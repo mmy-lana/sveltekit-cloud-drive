@@ -183,13 +183,15 @@ export interface UpdateItemDTO {
   isTrashed?: boolean;
   trashedAt?: FieldValue | null;
   uploadStatus?: UploadStatus;
+  /** Folder accent colour. Only meaningful when `type === 'folder'`. */
+  color?: string | null;
   updatedAt: FieldValue;
 }
 
 /** Read-model projection of a partial {@link UpdateItemDTO} (identity fields excluded). */
 export type UpdateItemPatch = Partial<
   Omit<DriveItemBase, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
->;
+> & Pick<UpdateItemDTO, 'color'>;
 
 /** Quota ledger deltas applied inside a single Firestore transaction. */
 export interface QuotaDelta {
@@ -301,14 +303,20 @@ export function isDeletionPending(item: DriveItem): boolean {
 /* Item narrowing helpers                                                      */
 /* -------------------------------------------------------------------------- */
 
-/** Narrow a {@link DriveItem} to its file variant. */
-export function isDriveFile(item: DriveItem): item is DriveFile {
-  return item.type === 'file';
+/**
+ * Narrow a {@link DriveItem} to its file variant.
+ *
+ * Accepts an absent item so it can be applied directly to a map lookup, which
+ * is where it is used most — `isDriveFile(store.getFile(id))` must narrow, not
+ * crash, when the file is not in the current scope.
+ */
+export function isDriveFile(item: DriveItem | null | undefined): item is DriveFile {
+  return item != null && item.type === 'file';
 }
 
-/** Narrow a {@link DriveItem} to its folder variant. */
-export function isDriveFolder(item: DriveItem): item is DriveFolder {
-  return item.type === 'folder';
+/** Narrow a {@link DriveItem} to its folder variant. See {@link isDriveFile}. */
+export function isDriveFolder(item: DriveItem | null | undefined): item is DriveFolder {
+  return item != null && item.type === 'folder';
 }
 
 /** Type guard for untrusted `type` discriminators. */

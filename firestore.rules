@@ -39,6 +39,17 @@ service cloud.firestore {
       return value is string && value.size() > 0 && value.size() <= maxLength;
     }
 
+    /**
+     * A string field that is allowed to be empty.
+     *
+     * Used for values that are genuinely optional in a legitimate state — an
+     * anonymous account has no email address — so bounding the length is the
+     * only meaningful constraint.
+     */
+    function isBoundedString(value, maxLength) {
+      return value is string && value.size() <= maxLength;
+    }
+
     function isBoolField(value) {
       return value is bool;
     }
@@ -78,6 +89,32 @@ service cloud.firestore {
           && getAfter(itemsPath(parentId)).data.isTrashed == false);
     }
 
+    /**
+     * Update-time relaxation of `hasValidParent`, permitting a whole subtree to
+     * cross the trash boundary inside one batch.
+     *
+     * A strict check makes cascading impossible in *any* order: a child can only
+     * be written while its parent is untrashed, but the cascade necessarily
+     * writes the parent as trashed in the same batch. So the rule is narrowed
+     * to the one thing that actually matters — a document may not sit in the
+     * live tree beneath a parent that is in the trash.
+     *
+     * The allowance is deliberately one-directional. `data.isTrashed == true`
+     * permits the child to be written beneath a parent that is (or is becoming)
+     * trashed, which is exactly a cascade moving a subtree *into* the trash or a
+     * rename of something already there. The mirror — un-trashing a child while
+     * its parent stays in the trash — is still refused, which is the invariant
+     * that makes restore order meaningful: a parent must come back first.
+     */
+    function hasValidParentOnUpdate(data) {
+      return data.parentFolderId == null
+        || (existsAfter(itemsPath(data.parentFolderId))
+          && getAfter(itemsPath(data.parentFolderId)).data.ownerId == request.auth.uid
+          && getAfter(itemsPath(data.parentFolderId)).data.type == 'folder'
+          && (getAfter(itemsPath(data.parentFolderId)).data.isTrashed == false
+            || data.isTrashed == true));
+    }
+
     /** `isTrashed` and `trashedAt` must never disagree. */
     function hasConsistentTrashState(data) {
       return isBoolField(data.isTrashed)
@@ -86,20 +123,38 @@ service cloud.firestore {
           : data.trashedAt == null);
     }
 
-    /** Fields shared by both item types, checked on create and on update. */
-    function hasValidCommonFields(data) {
+    /**
+     * Fields shared by both item types, checked on create and on update.
+     *
+     * `updating` selects the parent rule: creating inside a trashed folder is
+     * always refused, whereas updating one is allowed only in the narrow
+     * cascade case described on `hasValidParentOnUpdate`.
+     */
+    function hasValidCommonFields(data, updating) {
       return data.ownerId == request.auth.uid
         && hasConsistentNaming(data)
-        && hasValidParent(data.parentFolderId)
+        && (updating
+          ? hasValidParentOnUpdate(data)
+          : hasValidParent(data.parentFolderId))
         && hasConsistentTrashState(data)
         && isBoolField(data.isStarred)
         && isTimestampField(data.createdAt)
         && isTimestampField(data.updatedAt);
     }
 
-    /** Extra payload required by a folder document. */
+    /**
+     * Extra payload required by a folder document.
+     *
+     * `color` is optional: the field is constrained when present, and its
+     * absence is not itself an error. Dereferencing an optional field without
+     * an `in` guard turns "this client did not set it" into a rules *exception*,
+     * which reads as a permission denial in every caller and hides the real
+     * cause — the same reason an omitted key must never masquerade as a bad
+     * value.
+     */
     function hasValidFolderPayload(data) {
-      return data.color == null
+      return !('color' in data)
+        || data.color == null
         || (data.color is string && data.color.size() <= 32);
     }
 
@@ -206,7 +261,8 @@ service cloud.firestore {
       let usedDelta = request.resource.data.quota.usedBytes - resource.data.quota.usedBytes;
       let reservedDelta = request.resource.data.quota.reservedBytes - resource.data.quota.reservedBytes;
       return (usedDelta > 0 && reservedDelta == -usedDelta)
-        || (usedDelta <= 0 && reservedDelta == 0);
+        || (usedDelta < 0 && reservedDelta == 0)
+        || (usedDelta == 0);
     }
 
     match /users/{userId} {
@@ -215,10 +271,17 @@ service cloud.firestore {
       /**
        * Provisioning: an account may only ever start with an empty ledger and a
        * non-negative ceiling. Setting that ceiling is a server-side action.
+       *
+       * `email` is bounded but not required to be non-empty, because the app
+       * signs in anonymously and a legitimate account genuinely has no address
+       * yet. Ownership is already established by `uid == userId` against the
+       * path segment, so the address adds no security here — it is display
+       * data, and refusing to create an account without one would only mean the
+       * whole drive is unavailable to the anonymous case.
        */
       allow create: if isSelf(userId)
         && request.resource.data.uid == userId
-        && isNonEmptyString(request.resource.data.email, 320)
+        && isBoundedString(request.resource.data.email, 320)
         && isNonEmptyString(request.resource.data.displayName, 128)
         && isTimestampField(request.resource.data.createdAt)
         && isTimestampField(request.resource.data.updatedAt)
@@ -247,11 +310,22 @@ service cloud.firestore {
        * Ownership-scoped read. Collection queries must therefore filter on
        * `ownerId`; a query that omits the filter is rejected, which is what
        * keeps cross-account reads impossible even via a crafted query.
+       *
+       * A document that does not exist is readable by anyone signed in, because
+       * it carries no data to leak. Without this clause the standard
+       * `getDoc(...).exists()` guard in the compensation path throws
+       * PERMISSION_DENIED instead of returning false, so an already-reclaimed
+       * upload could never be recognised as reclaimed and the caller would
+       * report a spurious failure.
        */
-      allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow read: if isSignedIn()
+        && (resource == null || resource.data.ownerId == request.auth.uid);
 
       allow create: if isSignedIn()
-        && hasValidCommonFields(request.resource.data)
+        && hasValidCommonFields(request.resource.data, false)
+        // A document is never born in the trash: the trash is reached only by
+        // trashing a document that already existed in the live tree.
+        && request.resource.data.isTrashed == false
         && (request.resource.data.type == 'folder'
           ? hasValidFolderPayload(request.resource.data)
           : (hasValidFilePayload(request.resource.data)
@@ -263,7 +337,7 @@ service cloud.firestore {
         && resource.data.ownerId == request.auth.uid
         && isNotTombstoned()
         && hasImmutableIdentity(request.resource.data)
-        && hasValidCommonFields(request.resource.data)
+        && hasValidCommonFields(request.resource.data, true)
         && (request.resource.data.type == 'folder'
           ? (hasValidFolderPayload(request.resource.data)
             && request.resource.data.uploadStatus == resource.data.uploadStatus)
@@ -275,14 +349,26 @@ service cloud.firestore {
                 request.resource.data.uploadStatus))));
 
       /**
-       * Idempotent permanent deletion: a file may only be hard-deleted once its
-       * tombstone exists, and a folder only after it has been trashed. A client
-       * therefore cannot skip the Storage cleanup phase for a file.
+       * Permanent deletion, in two shapes.
+       *
+       * A file that never committed — `reserved` or `uploading` — is directly
+       * deletable, because that is exactly the compensation the upload pipeline
+       * performs when a transfer fails or is cancelled: the ledger reservation
+       * is returned and the partial Storage object is removed in the same
+       * breath. Requiring a tombstone there would strand the reservation
+       * forever, because the quota transaction that would return the bytes is
+       * the very transaction performing the delete. Nothing is lost: those bytes
+       * are counted as reserved, never as used, and the Storage rules already
+       * confine the object to its owner.
+       *
+       * A file that *did* commit must be tombstoned first, so a client cannot
+       * skip the Storage cleanup phase and leak real used bytes. A folder may
+       * only be hard-deleted after it has been trashed.
        */
       allow delete: if isSignedIn()
         && resource.data.ownerId == request.auth.uid
         && (resource.data.type == 'file'
-          ? resource.data.uploadStatus == 'deletion-pending'
+          ? resource.data.uploadStatus in ['reserved', 'uploading', 'deletion-pending']
           : resource.data.isTrashed == true);
     }
 
