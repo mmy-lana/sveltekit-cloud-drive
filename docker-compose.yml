@@ -1,0 +1,15 @@
+services:
+  firebase-emulator:
+    image: spine3/firebase-emulator:latest
+    container_name: sveltekit-drive-emulators
+    ports:
+      - "4000:4000"
+      - "8080:8080"
+      - "9099:9099"
+      - "9199:9199"
+    volumes:
+      - ./firebase.json:/firebase/firebase.json
+      - ./firestore.rules:/firebase/firestore.rules
+      - ./storage.rules:/firebase/storage.rules
+    environment:
+      - FIREBASE_PROJECT=mock-drive-system
