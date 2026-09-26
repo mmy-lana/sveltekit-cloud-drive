@@ -316,6 +316,11 @@ export function isItemType(value: unknown): value is ItemType {
   return value === 'file' || value === 'folder';
 }
 
+/** Type guard for a view mode read back from storage or a URL. */
+export function isViewMode(value: unknown): value is ViewMode {
+  return value === 'grid' || value === 'list';
+}
+
 /** Type guard for untrusted sort fields. */
 export function isSortField(value: unknown): value is SortField {
   return value === 'name' || value === 'updatedAt' || value === 'sizeBytes';

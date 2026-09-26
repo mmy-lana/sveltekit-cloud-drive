@@ -457,7 +457,12 @@ export function getMimeCategory(mimeType: string | null | undefined, fileName?: 
   const normalized = normalizeMimeType(mimeType);
   const extension = fileName === undefined ? null : getFileExtension(fileName);
 
-  if (normalized !== null) {
+  // A generic MIME carries no information — browsers report
+  // `application/octet-stream` for anything they cannot classify, and an empty
+  // string for more still. Matching it against the exact-type table would pin
+  // those files to `binary` and discard the extension, which is a strictly
+  // better signal, so a generic value falls through to extension resolution.
+  if (normalized !== null && !isGenericMimeType(normalized)) {
     const exact = MIME_CATEGORY_BY_EXACT_TYPE[normalized];
     if (exact !== undefined) return exact;
 
@@ -488,6 +493,9 @@ export function getMimeCategory(mimeType: string | null | undefined, fileName?: 
 
     const guessed = MIME_TYPE_BY_EXTENSION[extension];
     if (guessed !== undefined) {
+      // A self-referential entry (`.bin` -> the generic fallback) would
+      // otherwise recurse forever; treat it as the absence of information.
+      if (guessed === normalized || isGenericMimeType(guessed)) return 'binary';
       // Re-enter classification with the authoritative guessed MIME so a single
       // definition of "what is a PDF" backs both paths.
       return getMimeCategory(guessed, fileName);
