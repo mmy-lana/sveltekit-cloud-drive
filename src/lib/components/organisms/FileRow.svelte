@@ -29,6 +29,12 @@
      * The row used to carry its own `sm:grid-cols-[...]` while the header
      * carried a different one, so the columns never lined up. One source for
      * both is the only arrangement that cannot drift.
+     *
+     * The invariant this has to satisfy is exact: **one track per cell that is
+     * in the flow at `md`**. The row renders four cells without an owner label
+     * and five with one, and the header renders the matching number, so the two
+     * templates have to differ by exactly that one track. Add a cell without
+     * adding a track and the last cell wraps onto an implicit second row.
      */
     template?: string;
     onOpen: (item: DriveItem) => void;
@@ -41,8 +47,8 @@
   let {
     item,
     selected,
-    ownerLabel = 'Me',
-    template = 'md:grid-cols-[minmax(0,1fr)_9rem_10rem_5rem_7rem]',
+    ownerLabel,
+    template = 'md:grid-cols-[minmax(0,1fr)_10rem_5rem_7rem]',
     onOpen,
     onToggleSelect,
     onContextMenu,
@@ -121,12 +127,13 @@
 </script>
 
 <!--
-  One DOM, two layouts. From `md` up the row is a five-column grid: name, owner,
-  date modified, file size, status. Below `md` it is a two-line card and the
-  last four cells are removed from the flow entirely, so the row can never
-  produce horizontal overflow at 360px. The context button lives inside the
-  name cell in both layouts, so there is exactly one trigger and its position is
-  always the far right of the line it belongs to.
+  One DOM, two layouts. From `md` up the row is a grid with tabular columns:
+  name, owner, date modified, file size, and a status cell — four tracks when
+  the list has no owner column, five when it does. Below `md` it is a two-line
+  card and the trailing cells are removed from the flow entirely, so the row can
+  never produce horizontal overflow at 360px. The context button lives inside
+  the name cell in both layouts, so there is exactly one trigger and its
+  position is always the far right of the line it belongs to.
 
   The root is the `role="row"`; the grid in `FileList` must not wrap it in a
   second one. It is also a direct child of the `role="grid"`, which is what lets
@@ -148,7 +155,15 @@
     'group relative flex cursor-pointer scroll-mt-24 flex-col gap-1 rounded-lg border bg-surface p-3',
     'transition-colors duration-150',
     'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-    'md:grid md:items-center md:gap-3 {template}',
+    // A template literal, deliberately. This used to be a plain string holding
+    // the *text* `{template}`, inside a `class={[...]}` array — and Svelte does
+    // not interpolate inside a JavaScript string literal, only inside markup.
+    // The rows therefore never received the grid template at all: `md:grid`
+    // still applied, with no `grid-template-columns`, so the browser invented
+    // one 1126px column and stacked name, owner, date, size and status on top of
+    // each other while the header stayed correctly aligned. The class attribute
+    // carried a literal `{template}` the whole time.
+    `md:grid md:items-center md:gap-3 ${template}`,
     selected ? 'border-accent bg-accent-soft/40' : 'border-transparent hover:bg-hover',
     className ?? ''
   ]
@@ -210,16 +225,26 @@
     />
   </div>
 
-  <!-- Cells 2-4: desktop/tablet columns, absent from the mobile layout. -->
-  <span class="hidden min-w-0 truncate text-sm text-fg-muted md:block" title={ownerLabel}>
-    {ownerLabel}
-  </span>
+  <!--
+    Cell 2: owner, present only when the list has an owner column.
+
+    Conditional for the same reason `template` differs by one track: an
+    unconditional cell would leave the no-owner template one cell short, and the
+    status cell would wrap onto an implicit second row.
+  -->
+  {#if ownerLabel !== undefined}
+    <span class="hidden min-w-0 truncate text-sm text-fg-muted md:block" title={ownerLabel}>
+      {ownerLabel}
+    </span>
+  {/if}
+
+  <!-- Cells 3-4: desktop/tablet columns, absent from the mobile layout. -->
   <span class="hidden min-w-0 truncate text-sm text-fg-muted md:block" title={modifiedFull}>
     {modifiedLabel}
   </span>
   <span class="hidden min-w-0 truncate text-sm text-fg-muted tabular-nums md:block">{sizeLabel}</span>
 
-  <!-- Cell 5: status only, so it never shifts the columns when it appears. -->
+  <!-- Last cell: status only, so it never shifts the columns when it appears. -->
   <span class="hidden min-w-0 justify-end md:flex">
     {#if file?.uploadStatus === 'failed'}
       <Badge tone="danger" size="sm" dot>Failed</Badge>

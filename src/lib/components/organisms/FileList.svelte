@@ -56,6 +56,14 @@
    * is absent across the whole mobile range instead of appearing for the 128px
    * sliver between the two, where a `9rem` track leaves almost nothing for the
    * name it exists to protect.
+   *
+   * The two templates differ by exactly one track, and they have to. This grid
+   * places the header in tracks 1..n; `FileRow` places its own cells in tracks
+   * 1..n. If the track count and the cell count ever disagree, the extra cell
+   * does not overflow — it wraps onto an implicit second row, and every column
+   * after the gap sits one position out of step with its heading. So the owner
+   * cell in `FileRow` is rendered conditionally for the same reason the track
+   * is dropped here, and the two edits belong in the same commit.
    */
   const template = $derived(
     ownerLabel === undefined
