@@ -47,9 +47,6 @@
   const sizeLabel = $derived(file === null ? 'Folder' : formatBytes(file.sizeBytes, { decimals: 1 }));
   const modifiedLabel = $derived(formatModifiedDate(item.updatedAt));
 
-  let clickCount = 0;
-  let clickTimer: ReturnType<typeof setTimeout> | null = null;
-
   function isTouchInput(): boolean {
     return typeof window !== 'undefined' && window.matchMedia('(hover: none)').matches;
   }
@@ -58,6 +55,15 @@
    * A single click on a pointer selects, matching every other file manager; a
    * double click opens. On touch there is no hover or double-click affordance,
    * so a single tap opens and selection stays on the checkbox.
+   *
+   * The distinction reads `event.detail`, the click count the browser maintains
+   * for this element: 1 on the first click of a sequence, 2 on the second, and
+   * back to 1 once the next click falls outside the double-click interval. It
+   * replaced a `clickCount` counter plus a 180ms `setTimeout` that every
+   * selection had to sit behind, so the row now reacts on the same frame as
+   * the click while a second click still opens. `>= 2` rather than `=== 2`, so
+   * the third click of a triple click opens once instead of falling through to
+   * a second toggle.
    */
   function handleClick(event: MouseEvent): void {
     if (selectionMode || isTouchInput()) {
@@ -65,20 +71,12 @@
       return;
     }
 
-    clickCount += 1;
-    if (clickTimer !== null) clearTimeout(clickTimer);
-
-    if (clickCount === 1) {
-      clickTimer = setTimeout(() => {
-        clickCount = 0;
-        onToggleSelect(item, event.shiftKey ? 'range' : 'toggle');
-      }, 180);
+    if (event.detail >= 2) {
+      onOpen(item);
       return;
     }
 
-    clickCount = 0;
-    clickTimer = null;
-    onOpen(item);
+    onToggleSelect(item, event.shiftKey ? 'range' : 'toggle');
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -94,10 +92,6 @@
     const element = event.currentTarget as HTMLElement;
     onContextMenu(item, { element });
   }
-
-  $effect(() => () => {
-    if (clickTimer !== null) clearTimeout(clickTimer);
-  });
 
   /**
    * Only folders are draggable. A file has nothing meaningful to be dropped

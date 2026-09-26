@@ -46,17 +46,46 @@
   let menuTaskId = $state<string | null>(null);
   let menuAnchor = $state<DropdownMenuAnchor | null>(null);
 
-  const open = $derived(menuTaskId !== null && menuAnchor !== null);
+  /**
+   * Whether the menu is open, as a two-way binding with `DropdownMenu`.
+   *
+   * This was a `$derived` of the anchor being non-null, handed down as
+   * `open={true}` and guarded by `{#if open && ...}`. Inside that guard the
+   * value is provably `true`, so `open={open}` would have been the same value
+   * and changed nothing. The actual defect is the missing write path.
+   *
+   * `DropdownMenu` closes itself on 'select', 'escape' and 'outside' by calling
+   * `onclose`, but on 'dismiss' — Tab out of the panel, or the window losing
+   * focus — it only sets its own `open` to false. A non-bound prop swallows
+   * that write, so the panel closed while this component still believed a menu
+   * was open, kept the stale point anchor, and left `DropdownMenu` mounted with
+   * nothing on screen. Binding makes the child's dismissal reach this state
+   * directly, so every close path lands in the same place.
+   */
+  let open = $state(false);
 
   function openMenu(event: MouseEvent, taskId: string): void {
     menuAnchor = { type: 'point', x: event.clientX, y: event.clientY };
     menuTaskId = taskId;
+    open = true;
   }
 
   function closeMenu(): void {
+    open = false;
     menuTaskId = null;
     menuAnchor = null;
   }
+
+  /**
+   * A menu that is not open holds no anchor. Tab-out and window-blur dismissals
+   * never reach `closeMenu`, so without this the component would keep a point
+   * captured at a coordinate that no longer means anything.
+   */
+  $effect(() => {
+    if (open) return;
+    menuTaskId = null;
+    menuAnchor = null;
+  });
 
   /** Human-readable status for a row. */
   function statusLabel(task: UploadTask): string {
@@ -237,7 +266,7 @@
   {@const task = store.tasks.find((candidate) => candidate.taskId === menuTaskId)}
   {#if task !== undefined}
     <DropdownMenu
-      open={true}
+      bind:open
       anchor={menuAnchor}
       label={`Options for ${task.fileName}`}
       onclose={closeMenu}

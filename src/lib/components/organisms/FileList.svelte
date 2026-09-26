@@ -65,8 +65,22 @@
    * cell in `FileRow` is rendered conditionally for the same reason the track
    * is dropped here, and the two edits belong in the same commit.
    */
+
+  /**
+   * Whether the Owner column exists, decided once, here.
+   *
+   * A display name that is present but blank is the same as no display name:
+   * the column would hold nothing, so it is normalised away rather than
+   * rendered empty. This is also the only place that decision is made — the
+   * track count, the header cells and the `ownerLabel` handed to `FileRow` all
+   * read `owner`, so the row's cell count cannot disagree with the track count.
+   * Deriving the fallback twice, once here and once in `FileRow`, is what
+   * allowed the two halves to drift in the first place.
+   */
+  const owner = $derived(ownerLabel !== undefined && ownerLabel.trim() === '' ? undefined : ownerLabel);
+
   const template = $derived(
-    ownerLabel === undefined
+    owner === undefined
       ? 'md:grid-cols-[minmax(0,1fr)_10rem_5rem_7rem]'
       : 'md:grid-cols-[minmax(0,1fr)_9rem_10rem_5rem_7rem]'
   );
@@ -79,16 +93,16 @@
            uppercase tracking-wide text-fg-muted {template}"
   >
     <span role="columnheader" aria-colindex={1} class="min-w-0 truncate">Name</span>
-    {#if ownerLabel !== undefined}
+    {#if owner !== undefined}
       <span role="columnheader" aria-colindex={2} class="hidden md:block">Owner</span>
     {/if}
-    <span role="columnheader" aria-colindex={ownerLabel === undefined ? 2 : 3} class="hidden md:block">
+    <span role="columnheader" aria-colindex={owner === undefined ? 2 : 3} class="hidden md:block">
       Modified
     </span>
-    <span role="columnheader" aria-colindex={ownerLabel === undefined ? 3 : 4} class="hidden md:block">
+    <span role="columnheader" aria-colindex={owner === undefined ? 3 : 4} class="hidden md:block">
       Size
     </span>
-    <span role="columnheader" aria-colindex={ownerLabel === undefined ? 4 : 5} class="sr-only">
+    <span role="columnheader" aria-colindex={owner === undefined ? 4 : 5} class="sr-only">
       Actions
     </span>
   </div>
@@ -108,7 +122,7 @@
       {item}
       selected={selectedIds.has(item.id)}
       {selectionMode}
-      {ownerLabel}
+      ownerLabel={owner}
       {template}
       {onOpen}
       {onToggleSelect}
