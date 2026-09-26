@@ -25,6 +25,21 @@
  * presentation state owned by this device. Nothing here updates `items` ahead
  * of Firestore: quota, upload status and trash state only ever move when a
  * transaction commits, which is what keeps the on-screen numbers honest.
+ *
+ * Storage backends
+ * ----------------
+ * Every method resolves its backend once, at the top, from `getActiveRepository`.
+ * A `null` result means Firebase owns the drive and the code below runs exactly
+ * as it always has — no repository import is consulted, no `if (demo)` changes
+ * an existing decision, and the Firestore path is byte-for-byte the one the
+ * emulator suites were written against. A non-`null` result means a local
+ * repository owns the drive and each method delegates to it wholesale.
+ *
+ * The branch sits at the top of the method rather than around individual
+ * Firestore calls, so there is exactly one place per operation where the two
+ * worlds can diverge, and the second world is one `await` long. Both paths share
+ * the same domain rules: name validation, collision resolution, cycle refusal
+ * and restore reparenting live in `$lib/domain`, not in either backend.
  */
 import {
   collection,
@@ -46,13 +61,13 @@ import {
   type DocumentSnapshot,
   type FirestoreError,
   type QueryConstraint,
-  type Transaction,
-  type Unsubscribe
+  type Transaction
 } from 'firebase/firestore';
 import { SvelteMap } from 'svelte/reactivity';
 import { getFirestoreClient, getStorageClient } from '$lib/firebase/client';
 import { classifyError, type ClassifiedError } from '$lib/firebase/errors';
 import { authStore } from '$lib/stores/authStore.svelte';
+import { getActiveRepository, type DriveRepository, type DriveUnsubscribe } from '$lib/services/driveRepository';
 import {
   MAX_ANCESTOR_DEPTH,
   MAX_BATCH_OPERATIONS,
@@ -185,7 +200,7 @@ export class DriveStore {
   #error = $state<ClassifiedError | null>(null);
   #pendingCount = $state(0);
 
-  #unsubscribe: Unsubscribe | null = null;
+  #unsubscribe: DriveUnsubscribe | null = null;
   /** Separate from `#unsubscribe`: the bin's size is needed in every scope. */
   #trashCount = $state(0);
   /** Whose bin is being counted; `null` once the session ends. */
@@ -378,13 +393,19 @@ export class DriveStore {
   }
 
   #resubscribe(): void {
-    this.#unsubscribe?.();
+    detach(this.#unsubscribe);
     this.#unsubscribe = null;
 
     const uid = authStore.uid;
     if (uid === null) return;
 
     this.#subscribeTrashCount(uid);
+
+    const repository = getActiveRepository();
+    if (repository !== null) {
+      this.#resubscribeLocal(repository);
+      return;
+    }
 
     const constraints: QueryConstraint[] = [where('ownerId', '==', uid)];
 
@@ -431,6 +452,39 @@ export class DriveStore {
   }
 
   /**
+   * Attach to a local repository instead of a Firestore query.
+   *
+   * The repository hands back a handle synchronously and delivers the first
+   * batch once its store has opened, which is the same attach-then-deliver order
+   * `onSnapshot` uses. Every later batch is the full scope, so the state
+   * transitions below are the same ones the query path makes and the loading
+   * states need no mode-specific handling anywhere above them.
+   */
+  #resubscribeLocal(repository: DriveRepository): void {
+    this.#status = 'loading';
+
+    this.#unsubscribe = repository.subscribeItems(
+      this.#scope,
+      (items) => {
+        this.#items.clear();
+        for (const item of items) this.#items.set(item.id, item);
+        this.#firstSnapshot = true;
+        this.#status = 'ready';
+        void this.#refreshTrashCount();
+      },
+      (error: unknown) => {
+        this.#error = classifyError(error);
+        this.#status = 'error';
+        this.#firstSnapshot = true;
+      }
+    );
+
+    if (this.#scope.kind === 'folder' && this.#scope.folderId !== null) {
+      void this.#loadAncestors(this.#scope.folderId);
+    }
+  }
+
+  /**
    * Walk a folder's lineage into the flat ancestor cache.
    *
    * Each level is one point lookup and the chain stops at the first id already
@@ -461,16 +515,22 @@ export class DriveStore {
     if (uid === null || this.#trashCountPending) return;
     this.#trashCountPending = true;
 
+    const repository = getActiveRepository();
     try {
-      const aggregate = await getCountFromServer(
-        query(
-          collection(getFirestoreClient(), 'items'),
-          where('ownerId', '==', uid),
-          where('isTrashed', '==', true)
-        )
-      );
+      const count =
+        repository === null
+          ? (
+              await getCountFromServer(
+                query(
+                  collection(getFirestoreClient(), 'items'),
+                  where('ownerId', '==', uid),
+                  where('isTrashed', '==', true)
+                )
+              )
+            ).data().count
+          : await repository.countTrashed();
       // Drop a result that arrived after sign-out or an account switch.
-      if (this.#trashCountUid === uid) this.#trashCount = aggregate.data().count;
+      if (this.#trashCountUid === uid) this.#trashCount = count;
     } catch {
       if (this.#trashCountUid === uid) this.#trashCount = 0;
     } finally {
@@ -483,6 +543,7 @@ export class DriveStore {
     const uid = authStore.uid;
     if (uid === null) return;
 
+    const repository = getActiveRepository();
     let cursor: string | null = folderId;
     let guard = 0;
 
@@ -495,10 +556,8 @@ export class DriveStore {
           continue;
         }
 
-        const snapshot = await getDoc(doc(getFirestoreClient(), 'items', cursor));
-        if (!snapshot.exists()) break;
-
-        const item = toDriveItem(snapshot.id, snapshot.data());
+        const item =
+          repository === null ? await readRemoteItem(cursor) : await repository.getItem(cursor);
         if (item === null || !isDriveFolder(item)) break;
 
         this.#ancestors.set(item.id, item);
@@ -514,9 +573,8 @@ export class DriveStore {
 
   /** Stop the subscription. Called by the shell on destroy. */
   destroy(): void {
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
-    this.#trashCount = 0;
+    detach(this.#unsubscribe);
+    this.#unsubscribe = null;    this.#trashCount = 0;
     this.#trashCountUid = null;
     this.#folderIndex.clear();
     this.#folderTreeStatus = 'idle';
@@ -562,8 +620,20 @@ export class DriveStore {
     this.#folderTreeStatus = 'loading';
 
     const request = (async () => {
-      const db = getFirestoreClient();
+      const repository = getActiveRepository();
+
       try {
+        if (repository !== null) {
+          // A local store already holds every folder, so there is no page to
+          // walk: one read replaces the paginated loop below.
+          for (const folder of await repository.listFolders()) {
+            this.#folderIndex.set(folder.id, folder);
+          }
+          this.#folderTreeStatus = 'ready';
+          return;
+        }
+
+        const db = getFirestoreClient();
         const base = query(
           collection(db, 'items'),
           where('ownerId', '==', uid),
@@ -674,9 +744,15 @@ export class DriveStore {
     const uid = authStore.uid;
     if (uid === null) return { result: fail(new Error('Not signed in.')), validation };
 
+    const repository = getActiveRepository();
     const folderId = newItemId();
     this.#pendingCount += 1;
     try {
+      if (repository !== null) {
+        const created = await repository.createFolder(validation.name, parentFolderId, color);
+        return { result: ok([created.id]), validation };
+      }
+
       const db = getFirestoreClient();
       await runBoundedTransaction(db, async (tx) => {
         await assertWritableParent(tx, parentFolderId);
@@ -741,6 +817,12 @@ export class DriveStore {
 
     this.#pendingCount += 1;
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        await repository.renameItem(itemId, validation.name);
+        return { result: ok([itemId]), validation };
+      }
+
       const db = getFirestoreClient();
       await runNameTransaction(
         uid,
@@ -791,6 +873,12 @@ export class DriveStore {
     this.#pendingCount += 1;
 
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        const moved = await repository.moveItems([...movingIds], destinationId);
+        return ok(moved);
+      }
+
       const db = getFirestoreClient();
 
       // The parent and lineage checks are their own transaction, because a
@@ -877,6 +965,12 @@ export class DriveStore {
 
     this.#pendingCount += 1;
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        const trashed = await repository.trashItems(itemIds);
+        return ok(trashed);
+      }
+
       const subtree = await collectSubtree(uid, roots);
       const deepestFirst = [...subtree].sort((left, right) => right.depth - left.depth);
 
@@ -925,6 +1019,12 @@ export class DriveStore {
 
     this.#pendingCount += 1;
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        const restored = await repository.restoreItems(itemIds);
+        return ok(restored);
+      }
+
       const subtree = await collectSubtree(uid, roots);
       const restoredIds = new Set(subtree.map((entry) => entry.item.id));
 
@@ -970,6 +1070,18 @@ export class DriveStore {
 
     this.#pendingCount += 1;
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        // All three phases below — tombstone, drop the bytes, delete the
+        // document and release the quota — are one atomic commit per chunk
+        // here, because the bytes live in the same IndexedDB transaction as
+        // the document that names them. There is no window in which a live
+        // document points at deleted bytes, so there is no phase to fail over
+        // into a half-deleted state.
+        const deleted = await repository.permanentlyDelete(itemIds);
+        return ok(deleted);
+      }
+
       // Phase 1 — tombstone every file, so a Storage failure can be retried
       // without ever leaving a live document pointing at deleted bytes.
       const files = targets.filter(isDriveFile);
@@ -1044,6 +1156,18 @@ export class DriveStore {
     const uid = authStore.uid;
     if (uid === null) return fail(new Error('Not signed in.'));
 
+    const repository = getActiveRepository();
+    if (repository !== null) {
+      this.#pendingCount += 1;
+      try {
+        return ok(await repository.emptyTrash());
+      } catch (error) {
+        return fail(error);
+      } finally {
+        this.#pendingCount -= 1;
+      }
+    }
+
     const trashed = (await getDocs(
       query(
         collection(getFirestoreClient(), 'items'),
@@ -1077,6 +1201,11 @@ export class DriveStore {
 
     this.#pendingCount += 1;
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        return ok(await repository.setStarred(targets, starred));
+      }
+
       await forEachChunk(targets, MAX_BATCH_OPERATIONS, async (slice) => {
         const batch = writeBatch(getFirestoreClient());
         for (const id of slice) {
@@ -1111,6 +1240,12 @@ export class DriveStore {
 
     this.#pendingCount += 1;
     try {
+      const repository = getActiveRepository();
+      if (repository !== null) {
+        await repository.updateFolder(folderId, patch);
+        return ok([folderId]);
+      }
+
       await updateDoc(doc(getFirestoreClient(), 'items', folderId), update);
       return ok([folderId]);
     } catch (error) {
@@ -1126,8 +1261,20 @@ export class DriveStore {
    *
    * Called by the upload manager, not the UI: it is the only writer that may
    * create a document in a pre-commit upload status.
+   *
+   * A local repository is not asked to reserve anything here. It owns the whole
+   * reservation-then-commit sequence inside `uploadFile`, so a placeholder this
+   * method wrote would be an item the repository did not create and would not
+   * know about. The read below is kept so the method still answers honestly for
+   * a caller that asks about an id the repository has already used.
    */
   async ensureItemDocument(item: DriveItem): Promise<void> {
+    const repository = getActiveRepository();
+    if (repository !== null) {
+      if ((await repository.getItem(item.id)) !== null) return;
+      throw new Error('A local drive creates upload placeholders itself.');
+    }
+
     const snapshot = await getDoc(doc(getFirestoreClient(), 'items', item.id));
     if (snapshot.exists()) return;
     await setDoc(doc(getFirestoreClient(), 'items', item.id), item, { merge: true });
@@ -1136,9 +1283,8 @@ export class DriveStore {
   /** A single-item read, used by the preview modal for items outside the scope. */
   async fetchItem(itemId: string): Promise<DriveItem | null> {
     try {
-      const snapshot = await getDoc(doc(getFirestoreClient(), 'items', itemId));
-      if (!snapshot.exists()) return null;
-      const item = toDriveItem(snapshot.id, snapshot.data());
+      const repository = getActiveRepository();
+      const item = repository === null ? await readRemoteItem(itemId) : await repository.getItem(itemId);
       if (item !== null && isDriveFolder(item)) this.#ancestors.set(item.id, item);
       return item;
     } catch (error) {
@@ -1223,6 +1369,33 @@ function toMillis(value: unknown): number {
 function isMissingObject(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return code === 'storage/object-not-found' || code === 'storage/retry-limit-exceeded';
+}
+
+/**
+ * Detach a subscription from either backend.
+ *
+ * `onSnapshot` hands back a function and a repository hands back an object with
+ * `close()`. Both are held in one field, so the teardown lives here once rather
+ * than as a type test at every call site. Tolerates `null` because the first
+ * `#resubscribe` has nothing to detach.
+ */
+function detach(subscription: DriveUnsubscribe | null): void {
+  if (subscription === null) return;
+  if (typeof subscription === 'function') subscription();
+  else subscription.close();
+}
+
+/**
+ * One item by id, read from Firestore.
+ *
+ * The Firestore counterpart of `DriveRepository.getItem`, factored out because
+ * two callers need it and both want the same "absent, malformed, or unreadable
+ * is `null`" answer rather than three different ones.
+ */
+async function readRemoteItem(itemId: string): Promise<DriveItem | null> {
+  const snapshot = await getDoc(doc(getFirestoreClient(), 'items', itemId));
+  if (!snapshot.exists()) return null;
+  return toDriveItem(snapshot.id, snapshot.data());
 }
 
 /** One item within a subtree, carrying its distance from the operation root. */

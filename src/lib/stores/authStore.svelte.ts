@@ -11,6 +11,19 @@
  * coupling is deliberate: quota is per-user state, and creating it in one place
  * removes a class of "reserved bytes against a user document that does not
  * exist yet" failures.
+ *
+ * ## Also owns the choice of backend
+ *
+ * A deployment can arrive here in two shapes. Either Firebase is reachable and
+ * everything below is the existing, complete implementation. Or it is not — no
+ * credentials, placeholder credentials, or a project that does not answer — and
+ * the app serves a drive out of the browser's own IndexedDB instead.
+ *
+ * This store makes that decision because it is the only place that knows whether
+ * an identity was obtained, and an identity is the precondition for every other
+ * store doing anything at all. The mode is settled *before* {@link uid} becomes
+ * non-null, so by the time the shell re-syncs the item store on the way a uid
+ * appears, the repository serving that store is already installed.
  */
 import { browser } from '$app/environment';
 import {
@@ -29,9 +42,27 @@ import {
   updateDoc,
   type Unsubscribe
 } from 'firebase/firestore';
-import { getAuthClient, getFirestoreClient } from '$lib/firebase/client';
-import { classifyError, type ClassifiedError } from '$lib/firebase/errors';
+import {
+  clearFirebaseConnectionFailure,
+  detectDriveMode,
+  getAuthClient,
+  getFirestoreClient,
+  isEmulatorEnabled,
+  reportFirebaseConnectionFailure
+} from '$lib/firebase/client';
+import {
+  classifyError,
+  isUnreachableBackendError,
+  type ClassifiedError
+} from '$lib/firebase/errors';
 import { DEFAULT_QUOTA_BYTES } from '$lib/config/constants';
+import { DEMO_USER_ID, MockDriveRepository } from '$lib/services/mockDriveBackend';
+import {
+  setActiveRepository,
+  type DriveMode,
+  type DriveModeReason,
+  type DriveSubscription
+} from '$lib/services/driveRepository';
 import type { DriveUser, StorageQuota } from '$lib/types/drive';
 
 /** State of the anonymous account lifecycle. */
@@ -49,15 +80,26 @@ function deriveDisplayName(user: User): string {
   return `Guest ${user.uid.slice(0, 4)}`;
 }
 
+/** What a failed sign-in says when the failure is one of reachability. */
+const CONNECTION_FAILURE_DETAIL =
+  'A Firebase project is configured, but it could not be reached from this browser.';
+
 class AuthStore {
   #status = $state<AuthStatus>('initializing');
   #user = $state<User | null>(null);
+  #uid = $state<string | null>(null);
   #profile = $state<DriveUser | null>(null);
   #profileError = $state<ClassifiedError | null>(null);
   #error = $state<ClassifiedError | null>(null);
 
+  #mode = $state<DriveMode>('firebase');
+  #modeReason = $state<DriveModeReason>('configured');
+  #modeDetail = $state('');
+
   #authUnsubscribe: Unsubscribe | null = null;
   #profileUnsubscribe: Unsubscribe | null = null;
+  #localProfileSubscription: DriveSubscription | null = null;
+  #localRepository: MockDriveRepository | null = null;
   #initialized = false;
   #signInFlight: Promise<void> | null = null;
 
@@ -66,14 +108,50 @@ class AuthStore {
     return this.#status;
   }
 
-  /** The Firebase Auth user, or `null` before sign-in resolves. */
+  /** The Firebase Auth user, or `null` before sign-in resolves. Always `null` in demo mode. */
   get authUser(): User | null {
     return this.#user;
   }
 
   /** The uid every other store scopes its queries by. */
   get uid(): string | null {
-    return this.#user?.uid ?? null;
+    return this.#uid;
+  }
+
+  /**
+   * Which layer is serving the drive.
+   *
+   * The two stores branch on `getActiveRepository()` rather than on this, because
+   * that is what actually performs the work — but they must never disagree, and
+   * this getter is the one place the answer is published so they can be compared.
+   */
+  get mode(): DriveMode {
+    return this.#mode;
+  }
+
+  /** Why the app landed in {@link mode}. Surfaced verbatim in the demo dialog. */
+  get modeReason(): DriveModeReason {
+    return this.#modeReason;
+  }
+
+  /** The sentence behind {@link modeReason}. */
+  get modeDetail(): string {
+    return this.#modeDetail;
+  }
+
+  /** `true` when the drive is served by the browser rather than by Firebase. */
+  get isDemoMode(): boolean {
+    return this.#mode === 'demo';
+  }
+
+  /**
+   * `true` when the local drive survives a reload.
+   *
+   * `false` means IndexedDB was refused and the drive is held in memory, so the
+   * demo dialog can say so instead of promising persistence it cannot deliver.
+   */
+  get isDemoPersistent(): boolean {
+    return this.#localRepository?.isPersistent ?? true;
   }
 
   /** The `users/{uid}` document, including the authoritative quota ledger. */
@@ -112,7 +190,7 @@ class AuthStore {
    */
   get isAuthenticated(): boolean {
     return (
-      this.#user !== null &&
+      this.#uid !== null &&
       this.#status !== 'initializing' &&
       this.#status !== 'signing-in'
     );
@@ -120,22 +198,29 @@ class AuthStore {
 
   /** `true` once a uid *and* the profile that carries the quota ledger exist. */
   get isReady(): boolean {
-    return this.#user !== null && this.#profile !== null;
+    return this.#uid !== null && this.#profile !== null;
   }
 
   /**
-   * Begin the anonymous session.
+   * Begin the session: an anonymous Firebase sign-in, or a local drive.
    *
    * Idempotent and safe to call from several components in the same tick: the
    * in-flight promise is shared, so mounting the shell twice cannot race two
    * `signInAnonymously` calls against each other.
    *
-   * Must only be called in the browser — Firebase has no SSR contract.
+   * Must only be called in the browser — Firebase has no SSR contract, and
+   * IndexedDB has none either, so the local path is equally client-only.
    */
   async initialize(): Promise<void> {
     if (!browser) return;
     if (this.#initialized) return;
     this.#initialized = true;
+
+    const detection = detectDriveMode();
+    if (detection.mode === 'demo') {
+      await this.#enterDemoMode(detection.reason, detection.detail);
+      return;
+    }
 
     this.#status = 'signing-in';
 
@@ -144,6 +229,7 @@ class AuthStore {
       (user) => {
         this.#user = user;
         if (user === null) {
+          this.#uid = null;
           this.#profileUnsubscribe?.();
           this.#profileUnsubscribe = null;
           this.#profile = null;
@@ -151,12 +237,12 @@ class AuthStore {
           this.#status = 'signed-out';
           return;
         }
+        this.#uid = user.uid;
         this.#status = 'signed-in';
         void this.#bindProfile(user);
       },
       (error) => {
-        this.#error = classifyError(error);
-        this.#status = 'error';
+        void this.#handleStartupFailure(error);
       }
     );
 
@@ -166,10 +252,103 @@ class AuthStore {
       if (getAuthClient().currentUser === null) {
         await signInAnonymously(getAuthClient());
       }
+      clearFirebaseConnectionFailure();
     } catch (error) {
+      await this.#handleStartupFailure(error);
+    }
+  }
+
+  /**
+   * Decide whether a startup failure is fatal, or is a reason to go local.
+   *
+   * The two exclusions are the entire policy:
+   *
+   * - **The emulator never fails over.** A developer who asked for the local
+   *   suite and got an error has a bug — a container that did not start, a
+   *   port that is taken, a seed that did not apply. Swapping in an IndexedDB
+   *   drive would make every one of those look like a working app, and the
+   *   emulator suites in `pnpm run verify` are the only thing standing between
+   *   a regression and a deployment.
+   * - **A refusal never fails over.** See
+   *   {@link isUnreachableBackendError}: a rules denial and an expired session
+   *   are answers from a live project, and hiding either behind a local drive
+   *   conceals a real fault behind a healthy-looking UI.
+   */
+  async #handleStartupFailure(error: unknown): Promise<void> {
+    if (isEmulatorEnabled() || !isUnreachableBackendError(error)) {
       this.#error = classifyError(error);
       this.#status = 'error';
+      return;
     }
+
+    reportFirebaseConnectionFailure(CONNECTION_FAILURE_DETAIL);
+    await this.#enterDemoMode('connection-failed', CONNECTION_FAILURE_DETAIL);
+  }
+
+  /**
+   * Serve the drive from the browser.
+   *
+   * The ordering inside this method is load-bearing. Every step that changes
+   * what the rest of the app sees comes *after* the repository is fully open and
+   * installed:
+   *
+   * 1. The repository is opened, so the store that never exists is not one that
+   *    reports a failure later.
+   * 2. `setActiveRepository` runs, so the item store finds a backend the moment
+   *    it looks.
+   * 3. Only then does {@link uid} become non-null, which is the signal the
+   *    shell's effect uses to sync the item store.
+   *
+   * Inverting 2 and 3 produces a real and very confusing failure: the store
+   * syncs against a `null` repository, takes the Firebase branch, and throws
+   * against a config that no longer exists.
+   */
+  async #enterDemoMode(reason: DriveModeReason, detail: string): Promise<void> {
+    this.#status = 'signing-in';
+    this.#mode = 'demo';
+    this.#modeReason = reason;
+    this.#modeDetail = detail;
+
+    const repository = new MockDriveRepository();
+    try {
+      await repository.open();
+    } catch (error) {
+      // `MockDriveRepository` degrades to memory rather than refusing to open,
+      // so reaching here means IndexedDB *and* the in-memory fallback both
+      // failed. There is no third place to go.
+      this.#error = classifyError(error);
+      this.#status = 'error';
+      return;
+    }
+
+    this.#authUnsubscribe?.();
+    this.#authUnsubscribe = null;
+    this.#profileUnsubscribe?.();
+    this.#profileUnsubscribe = null;
+    this.#localProfileSubscription?.close();
+    this.#localProfileSubscription = null;
+    this.#user = null;
+    this.#profile = null;
+    this.#profileError = null;
+    this.#error = null;
+
+    this.#localRepository = repository;
+    setActiveRepository(repository);
+
+    this.#uid = DEMO_USER_ID;
+    this.#status = 'signed-in';
+
+    // The ledger is re-derived after every local mutation, so this subscription
+    // is what keeps the storage meter live rather than a one-time read.
+    this.#localProfileSubscription = repository.subscribeProfile(
+      (profile) => {
+        this.#profile = profile;
+        this.#profileError = null;
+      },
+      (error: unknown) => {
+        this.#profileError = classifyError(error);
+      }
+    );
   }
 
   /**
@@ -251,16 +430,33 @@ class AuthStore {
    * session, so the button cannot resurrect a profile for a user who is gone.
    */
   retryProfile(): void {
+    if (this.#mode === 'demo') {
+      // The local drive is in memory, so there is nothing to retry against: the
+      // profile only fails here if the repository itself failed to open, and
+      // that is reported as an error rather than as a drive problem. Clearing
+      // the flag is the whole of the recovery.
+      this.#profileError = null;
+      return;
+    }
+
     const user = this.#user;
     if (user === null) return;
     this.#profileError = null;
     void this.#bindProfile(user);
   }
 
-  /** Change the display name shown in the account menu. */
+  /**
+   * Change the display name shown in the account menu.
+   *
+   * Firebase-only, and deliberately so: this writes both an Auth profile field
+   * and a Firestore document, and the local repository's contract has no
+   * equivalent because a local account has no one to rename it away from. The
+   * guard is a no-op rather than a fake success, because a name that appeared
+   * to change and did not would be worse than one that stayed put.
+   */
   async setDisplayName(displayName: string): Promise<void> {
     const user = this.#user;
-    if (user === null) return;
+    if (user === null || this.#mode === 'demo') return;
 
     const trimmed = displayName.trim();
     if (trimmed.length === 0) {
@@ -290,9 +486,15 @@ class AuthStore {
    * There is no user-facing sign-out in this build — the app is a single-owner
    * demo — but the teardown is implemented because the account menu exposes it
    * and a half-wired button is worse than none.
+   *
+   * In demo mode there is no session to end: the local account is not an
+   * identity anyone can leave. The shell hides the control rather than calling
+   * this, and the guard here is the second line of that same defence.
    */
   async signOut(): Promise<void> {
     if (!browser) return;
+    if (this.#mode === 'demo') return;
+
     try {
       await firebaseSignOut(getAuthClient());
     } catch (error) {

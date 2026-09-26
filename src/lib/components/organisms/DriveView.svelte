@@ -20,7 +20,7 @@
   import { selectionStore } from '$lib/stores/selectionStore.svelte';
   import { viewportStore } from '$lib/stores/viewport.svelte';
   import { viewModeStore } from '$lib/stores/viewMode.svelte';
-  import { getStorageClient } from '$lib/firebase/client';
+  import { resolveFileAccess, startFileDownload } from '$lib/services/fileAccess';
   import { isDriveFile, isDriveFolder, type DriveFile, type DriveItem } from '$lib/types/drive';
   import { formatItems } from '$lib/utils/formatters';
   import { classifyError } from '$lib/firebase/errors';
@@ -304,10 +304,10 @@
   /**
    * Download a set of files.
    *
-   * `getDownloadURL` is called per file and each object URL is revoked as soon
-   * as the browser has taken it. A failure on one file does not abandon the
-   * rest: the user is told which ones did not start rather than losing the
-   * whole batch to the first error.
+   * `resolveFileAccess` is called per file and each URL is released as soon as
+   * the browser has taken it. A failure on one file does not abandon the rest:
+   * the user is told which ones did not start rather than losing the whole
+   * batch to the first error.
    */
   async function downloadItems(targets: readonly DriveItem[]): Promise<void> {
     const files = targets.filter(isDriveFile);
@@ -316,15 +316,8 @@
     const failed: string[] = [];
     for (const file of files) {
       try {
-        const { getDownloadURL, ref: storageRef } = await import('firebase/storage');
-        const url = await getDownloadURL(storageRef(getStorageClient(), file.storagePath));
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = file.name;
-        anchor.rel = 'noopener';
-        document.body.append(anchor);
-        anchor.click();
-        anchor.remove();
+        const access = await resolveFileAccess(file);
+        startFileDownload(access, file.name);
       } catch (error) {
         failed.push(`${file.name} (${classifyError(error).message})`);
       }

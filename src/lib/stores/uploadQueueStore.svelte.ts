@@ -40,6 +40,23 @@
  * At most {@link MAX_CONCURRENT_UPLOADS} transfers run at once, and bytes are
  * reserved only as a slot frees up — so dropping a hundred files never reserves
  * a hundred files' worth of quota at the same time.
+ *
+ * Local transfers
+ * ---------------
+ * When a repository owns the drive, `#run` hands the file to
+ * `IDriveRepository.uploadFile` and steps aside. That call is the whole
+ * reserve-transfer-commit sequence, already serialized against every other write
+ * the repository accepts, and it reports progress through the same listener the
+ * Storage path uses. The difference is in the edges, not the middle:
+ *
+ * - **Pause** aborts and re-runs from byte zero on resume. There is no resumable
+ *   session to suspend at, because the bytes are written in one operation, and
+ *   a row that reports a pause as a failure would be a lie about its own state.
+ * - **Cancel** aborts and unwinds inside the repository, so `#release` has
+ *   nothing left to compensate for and returns without touching Firestore.
+ * - **Compensation** is therefore a no-op, guarded by the same repository check
+ *   that `#run` used, so a mode switch mid-flight can never send a local
+ *   reservation to a backend that never issued it.
  */
 import { doc, runTransaction, serverTimestamp, type Firestore } from 'firebase/firestore';
 import {
@@ -52,6 +69,7 @@ import {
 import { getFirestoreClient, getStorageClient } from '$lib/firebase/client';
 import { classifyError, isQuotaRejection, type ClassifiedError } from '$lib/firebase/errors';
 import { authStore } from '$lib/stores/authStore.svelte';
+import { getActiveRepository, type DriveRepository } from '$lib/services/driveRepository';
 import { MAX_FILE_SIZE_BYTES } from '$lib/config/constants';
 import {
   assertWritableParent,
@@ -132,6 +150,18 @@ export class UploadQueueStore {
    * `bytesTransferred`/`status` fields that are genuinely data.
    */
   #activeUploads = new Map<string, StorageUploadTask>();
+
+  /**
+   * Live local transfers, keyed by row id, held outside the reactive graph.
+   *
+   * The local counterpart of {@link #activeUploads}, and for the same reason: a
+   * controller is a live object with an internal signal, not row data. The
+   * difference is that a local transfer *can* be aborted — there is no
+   * `pause()`/`resume()` pair to hold a byte offset, so `pause` and `cancel`
+   * both land here and `cancel` additionally sets `cancelRequested` so the run
+   * loop can tell the two apart.
+   */
+  #activeLocalUploads = new Map<string, AbortController>();
 
   /** Every row, oldest first. */
   get tasks(): readonly UploadTask[] {
@@ -254,6 +284,17 @@ export class UploadQueueStore {
     const task = this.#find(taskId);
     if (task === null || task.isSettled) return;
 
+    const local = this.#activeLocalUploads.get(taskId);
+    if (local !== undefined) {
+      // A local transfer is one serialized write, not a resumable session, so
+      // there is no offset to suspend at. The abort unwinds the reservation
+      // inside the repository; the run loop's catch restores the resumable row.
+      this.#pauseRequests.add(taskId);
+      local.abort();
+      task.status = 'paused';
+      return;
+    }
+
     const upload = this.#activeUploads.get(taskId);
     if (upload !== undefined) {
       upload.pause();
@@ -280,6 +321,8 @@ export class UploadQueueStore {
 
     this.#pauseRequests.delete(taskId);
 
+    // A local transfer holds no handle once its attempt has unwound, so a
+    // paused local row always falls through to a fresh run from byte zero.
     const upload = this.#activeUploads.get(taskId);
     if (upload !== undefined) {
       upload.resume();
@@ -298,6 +341,16 @@ export class UploadQueueStore {
     if (task === null || task.isSettled) return;
 
     task.cancelRequested = true;
+
+    const local = this.#activeLocalUploads.get(taskId);
+    if (local !== undefined) {
+      // The repository unwinds its own reservation before it rejects, so there is
+      // nothing for `#release` to give back and the row settles from the run
+      // loop's catch with the same "Upload cancelled." message the Storage path
+      // produces.
+      local.abort();
+      return;
+    }
 
     const upload = this.#activeUploads.get(taskId);
     if (upload !== undefined) {
@@ -395,40 +448,103 @@ export class UploadQueueStore {
 
     task.status = 'uploading';
 
+    // Resolved once, before the attempt starts, so the catch below can tell a
+    // local abort from a Storage failure without re-reading a mode that cannot
+    // have changed under it.
+    const repository = getActiveRepository();
+
     try {
-      const reservation = await this.#reserve(task, file);
-      if (reservation === null) return;
+      if (repository !== null) {
+        await this.#runLocal(task, file, repository);
+      } else {
+        const reservation = await this.#reserve(task, file);
+        if (reservation === null) return;
 
-      await this.#transfer(task, file, reservation);
+        await this.#transfer(task, file, reservation);
 
-      if (task.cancelRequested) {
-        await this.#release(task);
-        this.#settleAsError(task, {
-          kind: 'cancelled',
-          message: 'Upload cancelled.',
-          retryable: true,
-          cause: null
-        });
-        return;
+        if (task.cancelRequested) {
+          await this.#release(task);
+          this.#settleAsError(task, {
+            kind: 'cancelled',
+            message: 'Upload cancelled.',
+            retryable: true,
+            cause: null
+          });
+          return;
+        }
+
+        task.bytesTransferred = task.sizeBytes;
+        task.progressPercentage = 100;
+
+        await this.#commit(task);
       }
 
-      task.bytesTransferred = task.sizeBytes;
-      task.progressPercentage = 100;
-
-      await this.#commit(task);
       task.status = 'completed';
       task.isSettled = true;
     } catch (error) {
       await this.#release(task);
+
+      if (repository !== null && this.#pauseRequests.delete(task.taskId)) {
+        // A local pause aborts its transfer, so the rejection reaching here is
+        // the abort the pause asked for and not a failure to report. Restore
+        // the resumable row state the queued pause path produces.
+        task.status = 'paused';
+        task.errorMessage = null;
+        task.isSettled = false;
+        return;
+      }
+
       this.#settleAsError(task, this.#describeFailure(task, error));
     } finally {
       this.#releaseSlot();
-      // Drop the non-reactive handle in the same place the slot is dropped, so
+      // Drop the non-reactive handles in the same place the slot is dropped, so
       // a finished attempt releases both its concurrency slot and the strong
       // reference to its transfer. Nothing outside this method can observe the
       // task after this point, which is what makes the map the correct owner.
       this.#activeUploads.delete(task.taskId);
+      this.#activeLocalUploads.delete(task.taskId);
     }
+  }
+
+  /**
+   * Run one attempt against a local repository.
+   *
+   * A single `uploadFile` call, because a local repository owns the entire
+   * reserve-transfer-commit sequence and serializes it against every other write
+   * it accepts. Progress arrives through the same throttled listener shape the
+   * Storage path uses, so the row repaints identically and the panel needs no
+   * mode branch to display it.
+   */
+  async #runLocal(task: UploadTask, file: File, repository: DriveRepository): Promise<void> {
+    const controller = new AbortController();
+    this.#activeLocalUploads.set(task.taskId, controller);
+
+    let lastSample = 0;
+
+    const committed = await repository.uploadFile(
+      file,
+      task.targetFolderId,
+      (progress) => {
+        const now = Date.now();
+        if (now - lastSample < PROGRESS_SAMPLE_MS) return;
+        lastSample = now;
+
+        task.bytesTransferred = progress.bytesTransferred;
+        task.progressPercentage = progress.ratio * 100;
+        task.sampledAt = now;
+      },
+      controller.signal
+    );
+
+    // Assigned here rather than at a reserve phase: the local backend has no
+    // pre-commit document, so these are the first moment the ids exist. The
+    // fields still give a settled row the identity of what it produced, which is
+    // what `#release` and the row's own affordances read.
+    task.itemId = committed.id;
+    task.sessionId = committed.uploadSessionId;
+    task.storagePath = committed.storagePath;
+    task.bytesTransferred = task.sizeBytes;
+    task.progressPercentage = 100;
   }
 
   /** Classify a run-loop failure, distinguishing the cases the user can act on. */
@@ -675,6 +791,12 @@ export class UploadQueueStore {
    * Safe to call when nothing was reserved: the ledger read and the session
    * check are both no-ops in that case, so the same code path serves a
    * reservation-time failure, a transfer failure and a user cancel.
+   *
+   * A local repository unwinds its own reservation before it rejects, so the
+   * function returns as soon as the attempt's identity has been cleared. The
+   * clear is not optional: it is what stops a cancel that arrives after the
+   * rejection from reaching a Firestore-only compensation for a document no
+   * transaction here ever wrote.
    */
   async #release(task: UploadTask): Promise<void> {
     const uid = authStore.uid;
@@ -682,6 +804,7 @@ export class UploadQueueStore {
     task.itemId = null;
     task.sessionId = null;
 
+    if (getActiveRepository() !== null) return;
     if (uid === null || itemId === null || sessionId === null) return;
 
     const db = getFirestoreClient();

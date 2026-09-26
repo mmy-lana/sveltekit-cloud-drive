@@ -131,3 +131,53 @@ export function toErrorSummary(error: unknown): string {
   }
   return classified.message;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Failover                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Kinds that mean "there is no backend", as opposed to "the backend said no".
+ *
+ * `permission-denied` and `unauthenticated` are conspicuously absent. Both
+ * describe a project that answered — a rules decision and an expired session are
+ * both *responses*, and both are things a user or an operator must fix. Treating
+ * them as unreachable would swap a working cloud drive for a fake local one and
+ * hide the actual fault behind a healthy-looking UI.
+ */
+const UNREACHABLE_KINDS: ReadonlySet<DriveErrorKind> = new Set<DriveErrorKind>([
+  'unavailable',
+  'deadline-exceeded'
+]);
+
+/**
+ * Codes the SDK raises before a project is ever reached.
+ *
+ * Auth reports the whole class, because the very first call a fresh deployment
+ * makes is `signInAnonymously` and its failure modes are the earliest place a
+ * missing project, a placeholder key or a blocked origin shows itself.
+ */
+const UNREACHABLE_CODES: ReadonlySet<string> = new Set<string>([
+  'auth/api-key-not-valid.-not-a-valid-firebase-api-key',
+  'auth/api-key-not-valid.-invalid-firebase-api-key',
+  'auth/invalid-api-key',
+  'auth/network-request-failed',
+  'auth/operation-not-allowed',
+  'auth/unauthorized-domain',
+  'auth/internal-error',
+  'app-check/fetch-status-error'
+]);
+
+/**
+ * `true` when the failure is one a local drive could plausibly stand in for.
+ *
+ * Used only to decide whether to fail over, and only for a deployment that
+ * asked to be real — see {@link isEmulatorEnabled} callers for why the emulator
+ * path is excluded. A `true` here does not mean the failure *should* be papered
+ * over, only that it is a reachability failure rather than a refusal.
+ */
+export function isUnreachableBackendError(error: unknown): boolean {
+  const code = readFirebaseCode(error);
+  if (code !== null && UNREACHABLE_CODES.has(code)) return true;
+  return UNREACHABLE_KINDS.has(classifyError(error).kind);
+}

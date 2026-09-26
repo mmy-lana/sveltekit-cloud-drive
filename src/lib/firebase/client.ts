@@ -39,6 +39,7 @@ import {
   getStorage,
   type FirebaseStorage
 } from 'firebase/storage';
+import type { DriveMode, DriveModeReason } from '$lib/services/driveRepository';
 
 /** Hard-coded emulator ports, mirrored from `firebase.json` and `docker-compose.yml`. */
 export const EMULATOR_PORTS = Object.freeze({
@@ -84,6 +85,145 @@ let clients: FirebaseClients | null = null;
 export function isEmulatorEnabled(): boolean {
   const flag = env.PUBLIC_USE_FIREBASE_EMULATOR;
   return flag === 'true' || flag === '1';
+}
+
+/* -------------------------------------------------------------------------- */
+/* Drive mode detection                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The API key `.env.example` ships with, and the signal that a deployment is
+ * still running on it.
+ *
+ * This is the exact case that reaches production most often: the variables were
+ * copied out of the example file at some point, so all six are *present* and
+ * nothing is technically missing. Only a value check catches it, which is why
+ * presence alone is not enough.
+ */
+const PLACEHOLDER_API_KEY = 'mock-api-key';
+
+/** Project ids the emulator path substitutes, likewise treated as placeholders. */
+const PLACEHOLDER_PROJECT_ID = 'mock-drive-system';
+
+/** Outcome of {@link detectDriveMode}. */
+export interface DriveModeDetection {
+  /** Which layer will serve the drive. */
+  readonly mode: DriveMode;
+  /** Why. Rendered verbatim in the demo-mode dialog. */
+  readonly reason: DriveModeReason;
+  /** A sentence a human can act on. Never shown as a raw error. */
+  readonly detail: string;
+}
+
+/**
+ * A failure observed at runtime, recorded so the mode can reflect it.
+ *
+ * Set by the auth flow when a real sign-in attempt throws a network or
+ * configuration error. Held here rather than in a store because this module is
+ * already the authority on how the SDK is wired, and a store importing *this*
+ * module would make the direction of the edge wrong.
+ */
+let connectionFailure: string | null = null;
+
+/**
+ * Record that Firebase was configured but did not answer.
+ *
+ * Only ever called for a deployment that asked to be real. A failure against the
+ * emulator suite is left to surface as an error: a broken emulator must not
+ * masquerade as a working local drive, because then the actual bug — the suite
+ * that was supposed to be running — becomes invisible.
+ */
+export function reportFirebaseConnectionFailure(detail: string): void {
+  connectionFailure = detail;
+}
+
+/** Forget a recorded connection failure. Used when a retry succeeds. */
+export function clearFirebaseConnectionFailure(): void {
+  connectionFailure = null;
+}
+
+/** The six variables a real project must supply, with their current values. */
+function readConfigVariables(): ReadonlyArray<readonly [keyof FirebaseConfig, string | undefined]> {
+  return [
+    ['apiKey', env.PUBLIC_FIREBASE_API_KEY],
+    ['authDomain', env.PUBLIC_FIREBASE_AUTH_DOMAIN],
+    ['projectId', env.PUBLIC_FIREBASE_PROJECT_ID],
+    ['storageBucket', env.PUBLIC_FIREBASE_STORAGE_BUCKET],
+    ['messagingSenderId', env.PUBLIC_FIREBASE_MESSAGING_SENDER_ID],
+    ['appId', env.PUBLIC_FIREBASE_APP_ID]
+  ];
+}
+
+/**
+ * Decide which layer serves the drive, without initialising anything.
+ *
+ * The order of the checks is the whole design, and it is deliberate:
+ *
+ * 1. **The emulator wins outright.** `PUBLIC_USE_FIREBASE_EMULATOR=true` is an
+ *    explicit instruction to talk to a local suite, so it is never second-guessed
+ *    — not even by a failure. See {@link reportFirebaseConnectionFailure}.
+ * 2. **Static config first.** A missing variable or a shipped placeholder is the
+ *    root cause, and it is knowable without a network round trip. It is checked
+ *    before the recorded failure because when both apply, the placeholder is the
+ *    thing to fix and the failed connection is only its symptom.
+ * 3. **Then the recorded runtime failure**, which is the one case that can only
+ *    be discovered by trying.
+ *
+ * Called more than once per session — the auth flow asks, the shell asks, the
+ * diagnostics screen asks — so it is pure and allocation-light by construction.
+ */
+export function detectDriveMode(): DriveModeDetection {
+  if (isEmulatorEnabled()) {
+    return {
+      mode: 'firebase',
+      reason: 'configured',
+      detail: 'The local Firebase emulator suite is serving this drive.'
+    };
+  }
+
+  const variables = readConfigVariables();
+  const missing = variables.filter(([, value]) => !value?.trim()).map(([key]) => key);
+  if (missing.length > 0) {
+    return {
+      mode: 'demo',
+      reason: 'missing-config',
+      detail: `No Firebase project is configured. Missing: ${missing.join(', ')}.`
+    };
+  }
+
+  const apiKey = env.PUBLIC_FIREBASE_API_KEY?.trim() ?? '';
+  const projectId = env.PUBLIC_FIREBASE_PROJECT_ID?.trim() ?? '';
+  if (apiKey === PLACEHOLDER_API_KEY || projectId === PLACEHOLDER_PROJECT_ID) {
+    return {
+      mode: 'demo',
+      reason: 'placeholder-config',
+      detail: 'The Firebase credentials are still the placeholders from .env.example.'
+    };
+  }
+
+  if (connectionFailure !== null) {
+    return {
+      mode: 'demo',
+      reason: 'connection-failed',
+      detail: connectionFailure
+    };
+  }
+
+  return {
+    mode: 'firebase',
+    reason: 'configured',
+    detail: 'A Firebase project is configured.'
+  };
+}
+
+/**
+ * `true` when the app will run against the browser's own storage.
+ *
+ * The cheap form of {@link detectDriveMode}, for the call sites that only need
+ * to branch and have no use for the reason.
+ */
+export function isDemoModeEnabled(): boolean {
+  return detectDriveMode().mode === 'demo';
 }
 
 /** Emulator host, normalised and stripped of any scheme or trailing slash. */
@@ -140,8 +280,13 @@ function getBrowserEmulatorHost(): string {
  *
  * When the emulator is enabled, deterministic `mock-*` placeholders keep a
  * fresh clone runnable with zero configuration. When it is disabled, the
- * variables must be real: failing loudly at boot is far better than shipping a
- * build that silently authenticates against `mock-drive-system`.
+ * variables must be real.
+ *
+ * A caller that reached this branch was already routed here by a decision not
+ * to use the local drive, so throwing is correct — but the message now names the
+ * alternative, because "incomplete configuration" and "the app refused to start"
+ * read very differently to whoever is deploying when the message does not
+ * mention that a working drive was the other option.
  */
 function resolveConfig(): FirebaseConfig {
   if (isEmulatorEnabled()) {
@@ -155,20 +300,14 @@ function resolveConfig(): FirebaseConfig {
     };
   }
 
-  const required: ReadonlyArray<readonly [keyof FirebaseConfig, string | undefined]> = [
-    ['apiKey', env.PUBLIC_FIREBASE_API_KEY],
-    ['authDomain', env.PUBLIC_FIREBASE_AUTH_DOMAIN],
-    ['projectId', env.PUBLIC_FIREBASE_PROJECT_ID],
-    ['storageBucket', env.PUBLIC_FIREBASE_STORAGE_BUCKET],
-    ['messagingSenderId', env.PUBLIC_FIREBASE_MESSAGING_SENDER_ID],
-    ['appId', env.PUBLIC_FIREBASE_APP_ID]
-  ];
-
-  const missing = required.filter(([, value]) => !value?.trim()).map(([key]) => key);
+  const missing = readConfigVariables()
+    .filter(([, value]) => !value?.trim())
+    .map(([key]) => key);
   if (missing.length > 0) {
     throw new Error(
       `Firebase client configuration is incomplete. Missing: ${missing.join(', ')}. ` +
-        'Set the PUBLIC_FIREBASE_* variables in .env, or set PUBLIC_USE_FIREBASE_EMULATOR=true to run against the local emulator suite.'
+        'Set the PUBLIC_FIREBASE_* variables in .env to enable cloud sync, or leave them unset ' +
+        'to run the drive locally in the browser.'
     );
   }
 
@@ -307,6 +446,12 @@ export interface FirebaseRuntimeStatus {
   firestorePort: number;
   storagePort: number;
   persistentCache: boolean;
+  /** Which layer is serving the drive. */
+  driveMode: DriveMode;
+  /** Why, so the screen can explain the wiring rather than just assert it. */
+  driveModeReason: DriveModeReason;
+  /** The sentence behind {@link driveModeReason}. */
+  driveModeDetail: string;
 }
 
 /**
@@ -317,6 +462,8 @@ export interface FirebaseRuntimeStatus {
  */
 export function getFirebaseRuntimeStatus(): FirebaseRuntimeStatus {
   const emulator = isEmulatorEnabled();
+  const detection = detectDriveMode();
+
   return {
     ready: clients !== null,
     isEmulator: emulator,
@@ -326,6 +473,9 @@ export function getFirebaseRuntimeStatus(): FirebaseRuntimeStatus {
     authPort: EMULATOR_PORTS.auth,
     firestorePort: EMULATOR_PORTS.firestore,
     storagePort: EMULATOR_PORTS.storage,
-    persistentCache: supportsIndexedDb()
+    persistentCache: supportsIndexedDb(),
+    driveMode: detection.mode,
+    driveModeReason: detection.reason,
+    driveModeDetail: detection.detail
   };
 }

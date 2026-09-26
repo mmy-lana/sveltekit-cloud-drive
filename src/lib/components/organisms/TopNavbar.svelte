@@ -14,6 +14,7 @@
    */
   import { FolderPlus, Menu, Upload } from '@lucide/svelte';
   import Breadcrumbs from '$lib/components/molecules/Breadcrumbs.svelte';
+  import DemoModeBadge from '$lib/components/molecules/DemoModeBadge.svelte';
   import SearchBar from '$lib/components/molecules/SearchBar.svelte';
   import ViewToggle from '$lib/components/molecules/ViewToggle.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -98,6 +99,13 @@
     </div>
 
     <div class="flex shrink-0 items-center gap-1">
+      <!-- The status of the backend, next to the one control that changes it.
+           Hidden on the narrowest screens, where the sidebar account band shows
+           the same chip and there is no room for two. -->
+      <div class="mr-1 hidden sm:block">
+        <DemoModeBadge />
+      </div>
+
       <!-- `md`, not `sm`: this is the primary toolbar, and `sm` is a 36px
            control that clears the WCAG 2.5.8 minimum but not this project's
            44px bar. -->

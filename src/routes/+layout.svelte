@@ -15,6 +15,8 @@
    */
   import type { Snippet } from 'svelte';
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import { X } from '@lucide/svelte';
   import '../app.css';
   import { authStore } from '$lib/stores/authStore.svelte';
@@ -23,7 +25,7 @@
   import { viewportStore } from '$lib/stores/viewport.svelte';
   import { shellStore } from '$lib/stores/shellStore.svelte';
   import { viewModeStore } from '$lib/stores/viewMode.svelte';
-  import { getStorageClient } from '$lib/firebase/client';
+  import { scopeHref } from '$lib/domain/scopes';
   import { classifyError } from '$lib/firebase/errors';
   import { FOLDER_DRAG_MIME, MAX_FILE_SIZE_BYTES } from '$lib/config/constants';
   import { formatBytes } from '$lib/utils/formatters';
@@ -99,13 +101,26 @@
 
   // --- navigation ---------------------------------------------------------
 
-  function pathFor(scope: DriveScope): string {
-    if (scope.kind === 'folder') return scope.folderId === null ? '/' : `/folder/${scope.folderId}`;
-    return `/${scope.kind}`;
-  }
-
+  /**
+   * Move to a scope, and put the URL where the user can see it.
+   *
+   * `openScope` alone is not enough, and leaving it at that is what made the
+   * address bar lie: the sidebar and the breadcrumb trail both `preventDefault`
+   * their links and call in here, so with no `goto` the listing changed while
+   * the URL stayed. Back did nothing, a copied link opened the wrong folder, and
+   * re-opening the folder the URL already named resolved to the same path, so
+   * SvelteKit treated it as a no-op and never re-mounted the route to correct
+   * the store.
+   *
+   * The store is still set first and synchronously. Waiting for the router would
+   * mean one frame of the previous folder's listing after a click, and the route
+   * component's own `openScope` on mount then re-applies the same scope, which
+   * is idempotent.
+   */
   function navigate(scope: DriveScope): void {
+    const href = scopeHref(scope);
     driveStore.openScope(scope);
+    if (href !== page.url.pathname) void goto(href);
   }
 
   async function signOut(): Promise<void> {
@@ -269,8 +284,15 @@
    * Keyed on the uid so a sign-out and a subsequent sign-in as a different
    * account both re-subscribe, and so repeated renders of the same session
    * (profile arriving, filters changing) do not tear the listener down.
+   *
+   * The mode is read first, before the uid is tested. The demo path publishes
+   * the repository and the uid in that order, so a uid that appears while the
+   * mode is still unset would sync against a null repository and leave the drive
+   * permanently empty. Reading it here costs one extra dependency and makes the
+   * ordering requirement explicit instead of implicit.
    */
   $effect(() => {
+    void authStore.mode;
     if (authStore.uid !== null) driveStore.sync();
   });
 
@@ -329,6 +351,7 @@
           {quota}
           {trashCount}
           busy={signingOut}
+          canSignOut={!authStore.isDemoMode}
           onNavigate={navigate}
           onSignOut={() => void signOut()}
         />
@@ -455,6 +478,7 @@
         {quota}
         {trashCount}
         busy={false}
+        canSignOut={!authStore.isDemoMode}
         onNavigate={navigate}
         onSignOut={() => void signOut()}
       />

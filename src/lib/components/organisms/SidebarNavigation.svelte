@@ -18,7 +18,9 @@
    */
   import { HardDrive, LogOut, LoaderCircle, Star, Trash } from '@lucide/svelte';
   import type { LucideIcon } from '@lucide/svelte';
+  import DemoModeBadge from '$lib/components/molecules/DemoModeBadge.svelte';
   import StorageMeter from '$lib/components/molecules/StorageMeter.svelte';
+  import { scopeHref } from '$lib/domain/scopes';
   import { formatCount } from '$lib/utils/formatters';
   import type { StorageQuota } from '$lib/types/drive';
   import type { DriveScope } from '$lib/stores/driveStore.svelte';
@@ -40,6 +42,16 @@
     trashCount: number;
     /** True while an auth operation is in flight. */
     busy: boolean;
+    /**
+     * Whether a sign-out control can be offered at all.
+     *
+     * Demo mode has no Firebase session behind it, so a sign-out button would
+     * either do nothing or sign a stranger in on the same device. The control
+     * is removed rather than disabled: a permanently inert button reads as a
+     * broken app, and this one is not broken, it just has nothing to sign out
+     * of.
+     */
+    canSignOut: boolean;
     onNavigate: (scope: DriveScope) => void;
     onSignOut: () => void;
   }
@@ -52,6 +64,7 @@
     quota,
     trashCount,
     busy,
+    canSignOut,
     onNavigate,
     onSignOut
   }: Props = $props();
@@ -102,7 +115,7 @@
       {@const Icon = link.icon}
       {@const active = isActive(link)}
       <a
-        href={link.scope.kind === 'folder' ? (link.scope.folderId === null ? '/' : `/folder/${link.scope.folderId}`) : `/${link.scope.kind}`}
+        href={scopeHref(link.scope)}
         aria-current={active ? 'page' : undefined}
         onclick={(event) => {
           // A modified click should open a new tab, not hijack this one.
@@ -146,22 +159,24 @@
         <span class="block truncate text-xs text-fg-muted">{email}</span>
       {/if}
     </span>
-    <button
-      type="button"
-      class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-fg-muted
-             transition-colors hover:bg-surface-hover hover:text-fg
-             focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
-             disabled:opacity-50"
-      disabled={busy}
-      onclick={onSignOut}
-      aria-label={busy ? 'Signing out' : 'Sign out'}
-    >
-      {#if busy}
-        <LoaderCircle size={18} class="animate-spin" aria-hidden="true" />
-      {:else}
-        <LogOut size={18} aria-hidden="true" />
-      {/if}
-    </button>
+    {#if canSignOut}
+      <button
+        type="button"
+        class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-fg-muted
+               transition-colors hover:bg-surface-hover hover:text-fg
+               focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
+               disabled:opacity-50"
+        disabled={busy}
+        onclick={onSignOut}
+        aria-label={busy ? 'Signing out' : 'Sign out'}
+      >
+        {#if busy}
+          <LoaderCircle size={18} class="animate-spin" aria-hidden="true" />
+        {:else}
+          <LogOut size={18} aria-hidden="true" />
+        {/if}
+      </button>
+    {/if}
   </div>
 {/snippet}
 
@@ -174,6 +189,10 @@
     <StorageMeter {quota} variant="compact" />
 
     <div class="border-t border-line pt-3">
+      <DemoModeBadge variant="full" />
+    </div>
+
+    <div class="border-t border-line pt-3">
       {@render Account()}
     </div>
   </div>
@@ -184,6 +203,10 @@
     </div>
 
     <StorageMeter {quota} variant="compact" />
+
+    <div class="border-t border-line pt-3">
+      <DemoModeBadge />
+    </div>
 
     <div class="border-t border-line pt-3">
       {@render Account()}

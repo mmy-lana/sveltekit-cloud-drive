@@ -2,11 +2,13 @@
   /**
    * File preview.
    *
-   * The download URL is minted on open with `getDownloadURL` and then held for
-   * the life of the dialog, rather than being stored on the document. Two
-   * reasons: a token in Firestore goes stale and would have to be re-minted on
-   * every view anyway, and a file's bytes can change under a document that
-   * still points at the same path.
+   * The download URL is resolved on open through `resolveFileAccess` and then
+   * held for the life of the dialog, rather than being stored on the document.
+   * Two reasons: a token in Firestore goes stale and would have to be re-minted
+   * on every view anyway, and a file's bytes can change under a document that
+   * still points at the same path. A local file resolves to an object URL
+   * instead, and the effect's cleanup releases it — the alternative is a leaked
+   * blob per preview.
    *
    * What can be shown depends entirely on the type. An image, a PDF, a video or
    * an audio file renders inline; text is fetched and typeset; anything else —
@@ -27,9 +29,8 @@
   import Button from '$lib/components/ui/Button.svelte';
   import Modal from '$lib/components/ui/Modal.svelte';
   import FileIcon from '$lib/components/molecules/FileIcon.svelte';
-  import { getDownloadURL, ref as storageRef } from 'firebase/storage';
-  import { getStorageClient } from '$lib/firebase/client';
   import { classifyError } from '$lib/firebase/errors';
+  import { resolveFileAccess, type ResolvedFileAccess } from '$lib/services/fileAccess';
   import { getMimeCategory, resolveMimeType } from '$lib/utils/mimetypes';
   import { formatBytes, formatDateTime } from '$lib/utils/formatters';
   import type { DriveFile } from '$lib/types/drive';
@@ -210,6 +211,10 @@
   });
 
   $effect(() => {
+    // Held outside the reactive graph on purpose: it carries a `release()`
+    // closure and a blob handle, neither of which is data a template reads.
+    let access: ResolvedFileAccess | null = null;
+
     if (!open || file === null) {
       downloadUrl = null;
       textBody = null;
@@ -236,17 +241,29 @@
 
     void (async () => {
       try {
-        const url = await getDownloadURL(storageRef(getStorageClient(), target.storagePath as string));
+        const resolved = await resolveFileAccess(target);
+        // Held before the cancellation check, so the cleanup below can release
+        // it even when this effect was torn down while the resolve was in
+        // flight. Dropping it here would leak a blob per fast navigation.
+        access = resolved;
         if (cancelled) return;
-        downloadUrl = url;
+
+        downloadUrl = resolved.url;
+        const served = resolved.contentType;
 
         if (classify(target) === 'text') {
-          const response = await fetch(url);
+          const response = await fetch(resolved.url);
           if (!response.ok) throw new Error(`The file could not be read (${response.status}).`);
           const body = await response.text();
           if (cancelled) return;
           textLimit = Math.min(body.length, TEXT_LIMIT);
           textBody = body;
+        } else if (served !== null) {
+          // The bytes came from this device, so their type is the recorded one
+          // and there is no server left to disagree with it. The HEAD probe
+          // exists to catch a Storage bucket serving something other than what
+          // Firestore claims, and there is nothing to probe.
+          servedType = served;
         } else {
           // Confirm what the server will actually hand the browser before any
           // element parses it. Firestore's `mimeType` and the bytes are two
@@ -254,7 +271,7 @@
           // under the rules. A one-byte HEAD is enough to disagree with them,
           // and disagreeing is the only thing that matters here: the rendered
           // element follows the served type, never the recorded one.
-          const head = await fetch(url, { method: 'HEAD' });
+          const head = await fetch(resolved.url, { method: 'HEAD' });
           servedType = (head.headers.get('content-type') ?? '').toLowerCase().split(';')[0].trim();
         }
       } catch (error) {
@@ -267,6 +284,8 @@
 
     return () => {
       cancelled = true;
+      access?.release();
+      access = null;
     };
   });
 
