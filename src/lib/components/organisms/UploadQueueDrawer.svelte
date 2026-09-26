@@ -90,9 +90,9 @@
 </script>
 
 <section
-  class="fixed bottom-20 right-4 z-30 flex max-h-[70vh] w-[min(24rem,calc(100vw-2rem))] flex-col
+  class="fixed bottom-20 right-4 z-40 flex max-h-[70vh] w-[min(24rem,calc(100vw-2rem))] flex-col
          overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl
-         dark:border-gray-800 dark:bg-gray-900 {className}"
+         dark:border-gray-800 dark:bg-gray-900 sm:bottom-4 {className}"
   aria-label="Upload queue"
   aria-busy={store.isUploading}
 >

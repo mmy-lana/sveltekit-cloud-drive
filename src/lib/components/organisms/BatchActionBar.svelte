@@ -2,10 +2,16 @@
   /**
    * Batch action bar.
    *
-   * Replaces the selection count in place when items are selected, so the
-   * toolbar never jumps: the bar occupies the same row the count sat in, and
-   * the actions slide in. On mobile it is a fixed bar above the bottom nav so
-   * the thumb reaches it without a scroll; from `sm` up it floats as a card.
+   * Only mounted while a selection exists — `DriveView` gates it — because a
+   * permanently visible bar pinned over the bottom of the viewport is not a
+   * selection affordance, it is an obstruction. It covered the bottom
+   * navigation on every screen size and sat on top of the upload queue drawer.
+   *
+   * On mobile it is a fixed bar above the bottom nav, so the thumb reaches it
+   * without a scroll. From `sm` up it floats as a card: centred through
+   * `md`, then pinned to `md:left-4`. The right edge belongs to
+   * `UploadQueueDrawer` from `md` up, and a bar that floats into a panel the
+   * user is actively watching is the same defect in a different position.
    *
    * Nothing here mutates state. Each button hands the caller a *request*;
    * confirmation and selection reconciliation belong to the operation, not to
@@ -134,7 +140,7 @@
 </script>
 
 <div
-  class="fixed inset-x-0 bottom-16 z-40 border-t border-gray-200 bg-white/95 backdrop-blur-md dark:border-gray-800 dark:bg-gray-950/95 sm:inset-x-auto sm:bottom-4 sm:left-1/2 sm:w-auto sm:max-w-lg sm:-translate-x-1/2 sm:rounded-xl sm:border sm:px-2 sm:shadow-xl md:left-auto md:right-4 md:translate-x-0"
+  class="fixed inset-x-0 bottom-16 z-50 border-t border-gray-200 bg-white/95 backdrop-blur-md dark:border-gray-800 dark:bg-gray-950/95 sm:inset-x-auto sm:bottom-4 sm:left-1/2 sm:w-auto sm:max-w-lg sm:-translate-x-1/2 sm:rounded-xl sm:border sm:px-2 sm:shadow-xl md:left-4 md:right-auto md:translate-x-0"
   role="toolbar"
   aria-label="Selection actions"
   aria-busy={busy}

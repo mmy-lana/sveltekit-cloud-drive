@@ -99,20 +99,27 @@ service cloud.firestore {
      * to the one thing that actually matters — a document may not sit in the
      * live tree beneath a parent that is in the trash.
      *
-     * The allowance is deliberately one-directional. `data.isTrashed == true`
-     * permits the child to be written beneath a parent that is (or is becoming)
-     * trashed, which is exactly a cascade moving a subtree *into* the trash or a
-     * rename of something already there. The mirror — un-trashing a child while
-     * its parent stays in the trash — is still refused, which is the invariant
-     * that makes restore order meaningful: a parent must come back first.
+     * The allowance is deliberately one-directional, and deliberately *narrow*.
+     * `data.isTrashed == true` permits a child to be written beneath a parent
+     * that is (or is becoming) trashed, which is exactly a cascade moving a
+     * subtree *into* the trash. `resource.data.isTrashed == false` is what makes
+     * that an event rather than a state: only a document that is *crossing* the
+     * boundary this write may sit under a trashed parent. Without it, the clause
+     * degenerates into "any trashed document may be edited anywhere", and a
+     * client could reparent documents at will inside the bin — mutations against
+     * a tree the user cannot see, with the collision and lineage invariants that
+     * depend on the bin's shape quietly invalidated.
+     *
+     * The mirror is still refused, which is the invariant that makes restore
+     * order meaningful: a parent must come back first.
      */
     function hasValidParentOnUpdate(data) {
       return data.parentFolderId == null
         || (existsAfter(itemsPath(data.parentFolderId))
           && getAfter(itemsPath(data.parentFolderId)).data.ownerId == request.auth.uid
           && getAfter(itemsPath(data.parentFolderId)).data.type == 'folder'
-          && (getAfter(itemsPath(data.parentFolderId)).data.isTrashed == false
-            || data.isTrashed == true));
+          && ((getAfter(itemsPath(data.parentFolderId)).data.isTrashed == false)
+            || (data.isTrashed == true && resource.data.isTrashed == false)));
     }
 
     /** `isTrashed` and `trashedAt` must never disagree. */

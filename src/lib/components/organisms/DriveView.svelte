@@ -591,21 +591,23 @@
   </div>
 </div>
 
-<!-- Selection affordances. Positioned over the bottom bar's safe area. -->
-<BatchActionBar
-  count={selection.count}
-  busy={mutating || store.isBusy}
-  {inTrash}
-  hasFolders={selectionHasFolders}
-  totalBytes={selectedBytes}
-  onSelectAll={() => selection.selectAll(items.map((item) => item.id))}
-  onDownload={() => void downloadItems(selectedItems)}
-  onStar={() => void starSelected(selectedItems.every((item) => !item.isStarred))}
-  onTrash={() => void trashSelected()}
-  onRestore={() => void restoreSelected()}
-  onDeleteForever={() => (pendingConfirm = 'delete-forever')}
-  onClear={() => selection.clear()}
-/>
+<!-- Selection affordances. Mounted strictly when one or more items are selected. -->
+{#if selection.isActive && selection.count > 0}
+  <BatchActionBar
+    count={selection.count}
+    busy={mutating || store.isBusy}
+    {inTrash}
+    hasFolders={selectionHasFolders}
+    totalBytes={selectedBytes}
+    onSelectAll={() => selection.selectAll(items.map((item) => item.id))}
+    onDownload={() => void downloadItems(selectedItems)}
+    onStar={() => void starSelected(selectedItems.every((item) => !item.isStarred))}
+    onTrash={() => void trashSelected()}
+    onRestore={() => void restoreSelected()}
+    onDeleteForever={() => (pendingConfirm = 'delete-forever')}
+    onClear={() => selection.clear()}
+  />
+{/if}
 
 {#if menuItem !== null && menuAnchor !== null}
   <ItemContextMenu

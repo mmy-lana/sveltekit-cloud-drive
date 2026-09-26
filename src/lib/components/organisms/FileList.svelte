@@ -64,13 +64,13 @@
   );
 </script>
 
-<div role="grid" aria-label="Files and folders" aria-multiselectable="true" class="w-full">
+<div role="grid" aria-label="Files and folders" aria-multiselectable="true" class="w-full overflow-hidden">
   <div
     role="row"
     class="grid items-center gap-3 border-b border-line px-3 py-2 text-xs font-medium
            uppercase tracking-wide text-fg-muted {template}"
   >
-    <span role="columnheader" aria-colindex={1}>Name</span>
+    <span role="columnheader" aria-colindex={1} class="min-w-0 truncate">Name</span>
     {#if ownerLabel !== undefined}
       <span role="columnheader" aria-colindex={2} class="hidden md:block">Owner</span>
     {/if}

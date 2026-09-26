@@ -38,15 +38,36 @@ class ShellStore {
     return this.#openUploadPicker !== null && this.#openCreateFolder !== null;
   }
 
-  /** Open the shared file picker. A no-op before the shell has mounted. */
-  openUploadPicker(): void {
-    this.#openUploadPicker?.();
-  }
+  /*
+   * The two commands below are arrow properties rather than methods, and the
+   * reason is narrow enough to state precisely: a method that reaches a `#`
+   * field through `this` is only callable while `this` is the instance, and a
+   * consumer that tears the reference off — `onclick={shellStore.openUploadPicker}`,
+   * or a `{...shellStore}` spread into props — receives a bare function whose
+   * `this` is `undefined` at the moment the user clicks. That is not a silent
+   * no-op; it throws
+   *
+   *   TypeError: can't access private field or method: object is not the right class
+   *
+   * from inside the browser, on the first click, on whichever button happened to
+   * pass the reference. An arrow property closes over its instance at
+   * construction, so every consumer gets the same behaviour whether it calls
+   * `store.openUploadPicker()` or holds the bare reference.
+   *
+   * This is the general Svelte 5 rule: a component method is a *function to be
+   * called*, not a callback to be passed. Anything crossing a prop boundary or
+   * a DOM event binding must be a property or be wrapped at the call site.
+   */
 
-  /** Open the shared new-folder dialog. A no-op before the shell has mounted. */
-  openCreateFolderDialog(): void {
+  /** Open the shared file picker. Bound as an arrow property to survive method tear-off. */
+  openUploadPicker = (): void => {
+    this.#openUploadPicker?.();
+  };
+
+  /** Open the shared new-folder dialog. Bound as an arrow property to survive method tear-off. */
+  openCreateFolderDialog = (): void => {
     this.#openCreateFolder?.();
-  }
+  };
 }
 
 export const shellStore = new ShellStore();

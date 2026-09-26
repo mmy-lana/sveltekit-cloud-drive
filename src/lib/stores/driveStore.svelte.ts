@@ -43,6 +43,7 @@ import {
   where,
   writeBatch,
   type DocumentData,
+  type DocumentSnapshot,
   type FirestoreError,
   type QueryConstraint,
   type Transaction,
@@ -1284,6 +1285,20 @@ async function collectSubtree(uid: string, roots: readonly DriveItem[]): Promise
  * operation, and otherwise falls back to the root whenever the original parent
  * is still trashed or no longer exists — the alternative is an item that can
  * never satisfy `hasValidParent` and is therefore permanently unrestorable.
+ *
+ * The check walks the whole lineage rather than reading the parent alone.
+ * `hasValidParentOnUpdate` only inspects the immediate parent's `isTrashed`, so
+ * a parent that is itself live but sits beneath a trashed grandparent passes
+ * that rule and is then rejected by the restore-order invariant one level up:
+ * the write succeeds in isolation and aborts the whole `writeBatch` it shares,
+ * taking the *entire* subtree's restore down with it. A rule that is satisfied
+ * locally is not the same as a tree that is consistent, and only the tree is
+ * what the user asked for.
+ *
+ * Depth is bounded by {@link MAX_ANCESTOR_DEPTH} so a corrupt or cyclic
+ * `parentFolderId` chain cannot spin the walk; exhausting the budget keeps the
+ * original parent, which is the same optimistic choice the breadcrumb walk
+ * makes, and the rules remain the final arbiter either way.
  */
 async function resolveRestoreParent(item: DriveItem, restoredIds: ReadonlySet<string>): Promise<string | null> {
   const parentId = item.parentFolderId;
@@ -1291,11 +1306,33 @@ async function resolveRestoreParent(item: DriveItem, restoredIds: ReadonlySet<st
   if (restoredIds.has(parentId)) return parentId;
 
   try {
-    const snapshot = await getDoc(doc(getFirestoreClient(), 'items', parentId));
-    if (!snapshot.exists()) return null;
-    return snapshot.data().isTrashed === true ? null : parentId;
+    const db = getFirestoreClient();
+    let cursor: string | null = parentId;
+    let guard = 0;
+
+    while (cursor !== null && guard < MAX_ANCESTOR_DEPTH) {
+      // An ancestor in the same batch is being restored too, and the writes go
+      // out shallowest-first, so this lineage will be live by the time the item
+      // is written.
+      if (restoredIds.has(cursor)) return parentId;
+
+      // Annotated, as in `isDescendantOf`: the walk feeds each id back into the
+      // next lookup, so letting the snapshot type be inferred makes it depend on
+      // itself.
+      const snapshot: DocumentSnapshot<DocumentData> = await getDoc(doc(db, 'items', cursor));
+      if (!snapshot.exists()) return null;
+
+      const data = snapshot.data();
+      if (data.isTrashed === true || data.type !== 'folder') return null;
+
+      const next: unknown = data.parentFolderId;
+      cursor = typeof next === 'string' ? next : null;
+      guard += 1;
+    }
+
+    return parentId;
   } catch {
-    // An unreadable parent is treated as absent; the root is always writable.
+    // An unreadable or corrupt parent chain falls back safely to root.
     return null;
   }
 }

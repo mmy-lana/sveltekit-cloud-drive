@@ -304,11 +304,28 @@ export class UploadQueueStore {
       // `cancel()` rejects the task's promise with `storage/canceled`, which
       // the run loop treats as a user abort and compensates for.
       upload.cancel();
+      // Release here as well as in the run loop, because the run loop's own
+      // compensation is a no-op by the time it runs: `#release` claims the
+      // reservation by clearing `itemId`/`sessionId` synchronously, so the
+      // quota comes back on the click rather than whenever the rejection
+      // happens to unwind — which matters when the next queued row is already
+      // blocked on exactly those bytes.
+      void this.#release(task).catch(() => {
+        // A failed compensation is not a second failure to report: the run
+        // loop still settles the row as cancelled, and the orphan document
+        // stays guarded by its session id for the next attempt that touches it.
+      });
       return;
     }
 
     // Queued: nothing is in flight, so release the slot bookkeeping at once.
+    // A task cancelled in the window between `#reserve` and `#transfer` has a
+    // real reservation to give back, which is why this is not just the status
+    // write below.
     this.#pauseRequests.delete(taskId);
+    void this.#release(task).catch(() => {
+      // See above.
+    });
     task.status = 'error';
     task.errorMessage = 'Upload cancelled.';
     task.isSettled = true;
