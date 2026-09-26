@@ -254,6 +254,26 @@
     driveStore.scope.kind === 'trash' ? null : (driveStore.scopeTitle ?? null)
   );
 
+  /**
+   * Establish the listing subscription when — and only when — a uid exists.
+   *
+   * `driveStore.openScope()` is called during component setup, which happens
+   * before sign-in has resolved, so the store correctly records the intent and
+   * declines to subscribe: there is no `ownerId` to filter on yet. Nothing
+   * re-runs it afterwards on its own, so without this effect the drive stayed
+   * in `loading` for the rest of the session. That is worse than an error,
+   * because no listener error ever fires, so the "This folder could not be
+   * loaded" card never appears and the retry button that would call `sync()`
+   * is never rendered. The only recovery was a full page reload.
+   *
+   * Keyed on the uid so a sign-out and a subsequent sign-in as a different
+   * account both re-subscribe, and so repeated renders of the same session
+   * (profile arriving, filters changing) do not tear the listener down.
+   */
+  $effect(() => {
+    if (authStore.uid !== null) driveStore.sync();
+  });
+
 </script>
 
 <svelte:head>

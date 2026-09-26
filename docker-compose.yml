@@ -10,7 +10,25 @@
 
 services:
   firebase-emulator:
-    image: spine3/firebase-emulator:latest
+    # Built from ./Dockerfile.emulator rather than pulled from a registry.
+    #
+    # The only published all-in-one image, `spine3/firebase-emulator`, pins
+    # firebase-tools 9.17.0 (2021, Node 14). The Firestore web SDK this app
+    # ships (firebase 12.x) authenticates its gRPC-web "webchannel" streams by
+    # encoding the init message headers into the request *body* instead of the
+    # `Authorization` header, specifically so the browser avoids a CORS
+    # preflight. The 2021 Firestore emulator never learned to decode that
+    # encoding, so every browser read and write reaches it anonymous and the
+    # rules deny it with `permission-denied` at the first ownership check.
+    #
+    # Node clients are unaffected because they use the native gRPC transport,
+    # which puts the token in ordinary gRPC metadata. That asymmetry is the
+    # whole reason this looked like an application bug: `pnpm run verify` runs
+    # in Node and passes, while the browser cannot read its own drive.
+    build:
+      context: .
+      dockerfile: Dockerfile.emulator
+    image: sveltekit-drive-emulators:modern
     container_name: sveltekit-drive-emulators
     restart: unless-stopped
     # Bind to every interface so the suite is reachable from a containerised
@@ -24,10 +42,8 @@ services:
       - ./firebase.json:/firebase/firebase.json:ro
       # The CLI reads the project id from `.firebaserc`. Without it the Auth
       # emulator has no project and mints ID tokens with `aud: "change-me"`,
-      # which the Firestore emulator's gRPC-web path (i.e. every browser)
-      # rejects — so reads and writes arrive anonymous and the rules deny
-      # them. Node clients are unaffected, which is what makes this so easy to
-      # miss: the verification harness passes while the app is unusable.
+      # which the Firestore emulator rejects outright — so reads and writes
+      # arrive anonymous and the rules deny them.
       - ./.firebaserc:/firebase/.firebaserc:ro
       - ./firestore.rules:/firebase/firestore.rules:ro
       - ./firestore.indexes.json:/firebase/firestore.indexes.json:ro
@@ -37,12 +53,12 @@ services:
     environment:
       - FIREBASE_PROJECT=mock-drive-system
       - GCLOUD_PROJECT=mock-drive-system
-      # The base image hard-codes `GCP_PROJECT=change-me`, and the CLI reads
-      # `GCP_PROJECT` in preference to both `GCLOUD_PROJECT` and `.firebaserc`.
-      # Left alone, the Auth emulator mints ID tokens with `aud: "change-me"`
-      # and the Firestore emulator's gRPC-web path rejects them — so a browser
-      # issues every read and write anonymously and the rules deny it, while
-      # Node clients (which use the native gRPC transport) are unaffected.
+      # The base image would otherwise default `GCP_PROJECT` to `change-me`,
+      # and the CLI reads `GCP_PROJECT` in preference to both `GCLOUD_PROJECT`
+      # and `.firebaserc`. Left alone, the Auth emulator mints ID tokens with
+      # `aud: "change-me"` and Firestore rejects them — so a browser issues
+      # every read and write anonymously and the rules deny it, while Node
+      # clients are unaffected.
       - GCP_PROJECT=mock-drive-system
       # Accept logins from any origin; this suite is local-only by design.
       - FIREBASE_AUTH_EMULATOR_HOST=0.0.0.0:9099

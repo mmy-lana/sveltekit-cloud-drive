@@ -41,11 +41,14 @@
   };
 
   /**
-   * `sm` keeps a 36px visual footprint for dense toolbars while `md`/`lg` hold
-   * the full 44px touch minimum; all sizes remain pointer-sized.
+   * `sm` keeps a 36px footprint for dense toolbars, `md`/`lg` hold the full 44px
+   * touch minimum. The one exception is `sm` below 768px, where
+   * `.tap-target-compact` restores the 44px target: 36px is defensible beside a
+   * pointer and not defensible on a phone, and the row's own action button is
+   * exactly that case.
    */
   const SIZE_CLASSES: Record<IconButtonSize, string> = {
-    sm: 'h-9 w-9 rounded-md',
+    sm: 'h-9 w-9 rounded-md tap-target-compact',
     md: 'tap-target rounded-lg',
     lg: 'tap-target rounded-xl'
   };

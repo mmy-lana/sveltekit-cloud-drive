@@ -33,21 +33,40 @@ service firebase.storage {
     }
 
     /**
-     * Writes are bounded at 5 MiB per object (the documented Storage ceiling
-     * for a single non-resumable write) and must declare a content type, so a
-     * mislabelled upload cannot be persisted as `image/png` for a `.exe` and
+     * The `{itemId}` segment is an app-generated UUID.
+     *
+     * Pinned to the UUID grammar rather than merely "safe": the segment is never
+     * user-supplied, so anything that is not a canonical UUID is a path that did
+     * not come from `DriveFile.storagePath`, and refusing it keeps a crafted
+     * file name from addressing another item's object.
+     */
+    function isItemId(itemId) {
+      return itemId.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
+    }
+
+    /**
+     * Writes are bounded at 5 GiB per object and must declare a content type, so
+     * a mislabelled upload cannot be persisted as `image/png` for a `.exe` and
      * later be served back to a browser as an image.
+     *
+     * The ceiling mirrors `MAX_FILE_SIZE_BYTES` in `src/lib/config/constants.ts`.
+     * It used to be 5 MiB, which is the documented Storage ceiling for a single
+     * *non-resumable* write; this app streams with `uploadBytesResumable`, so the
+     * client accepted 5 GiB while the rules refused everything above 5 MiB. The
+     * two constants drifting apart is invisible until an upload larger than
+     * 5 MiB is reserved against the quota ledger and then rejected at the
+     * Storage layer, which orphans the reservation and the blob.
      */
     function isValidUpload(itemId, fileName) {
-      return isSafeSegment(itemId)
+      return isItemId(itemId)
         && isSafeSegment(fileName)
-        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.size <= 5 * 1024 * 1024 * 1024
         && request.resource.contentType != null;
     }
 
     match /users/{userId}/{itemId}/{fileName} {
       allow read: if isSelf(userId)
-        && isSafeSegment(itemId)
+        && isItemId(itemId)
         && isSafeSegment(fileName);
 
       allow create, update: if isSelf(userId) && isValidUpload(itemId, fileName);

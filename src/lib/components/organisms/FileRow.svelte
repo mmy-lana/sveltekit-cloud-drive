@@ -21,8 +21,16 @@
   interface Props {
     item: DriveItem;
     selected: boolean;
-    /** Owner label; hidden below `sm` where the row becomes a two-line card. */
+    /** Owner label; hidden below `md` where the row becomes a two-line card. */
     ownerLabel?: string;
+    /**
+     * Grid template shared with the list header.
+     *
+     * The row used to carry its own `sm:grid-cols-[...]` while the header
+     * carried a different one, so the columns never lined up. One source for
+     * both is the only arrangement that cannot drift.
+     */
+    template?: string;
     onOpen: (item: DriveItem) => void;
     onToggleSelect: (item: DriveItem, mode: 'toggle' | 'range') => void;
     onContextMenu: (item: DriveItem, anchor: { x: number; y: number } | { element: HTMLElement }) => void;
@@ -34,6 +42,7 @@
     item,
     selected,
     ownerLabel = 'Me',
+    template = 'md:grid-cols-[minmax(0,1fr)_9rem_10rem_5rem_7rem]',
     onOpen,
     onToggleSelect,
     onContextMenu,
@@ -112,12 +121,16 @@
 </script>
 
 <!--
-  One DOM, two layouts. From `sm` up the row is a five-column grid: name,
-  owner, date modified, file size, status. Below `sm` it is a two-line card and
-  the last four cells are removed from the flow entirely, so the row can never
+  One DOM, two layouts. From `md` up the row is a five-column grid: name, owner,
+  date modified, file size, status. Below `md` it is a two-line card and the
+  last four cells are removed from the flow entirely, so the row can never
   produce horizontal overflow at 360px. The context button lives inside the
   name cell in both layouts, so there is exactly one trigger and its position is
   always the far right of the line it belongs to.
+
+  The root is the `role="row"`; the grid in `FileList` must not wrap it in a
+  second one. It is also a direct child of the `role="grid"`, which is what lets
+  the row be its own grid track container without an intermediate element.
 -->
 <div
   role="row"
@@ -135,7 +148,7 @@
     'group relative flex cursor-pointer scroll-mt-24 flex-col gap-1 rounded-lg border bg-surface p-3',
     'transition-colors duration-150',
     'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-    'sm:grid sm:grid-cols-[minmax(0,1fr)_9rem_10rem_5rem_7rem] sm:items-center sm:gap-3',
+    'md:grid md:items-center md:gap-3 {template}',
     selected ? 'border-accent bg-accent-soft/40' : 'border-transparent hover:bg-hover',
     className ?? ''
   ]
@@ -175,8 +188,8 @@
         {/if}
       </span>
 
-      <!-- Line 2 on mobile only: the columns that are dropped below `sm`. -->
-      <span class="flex items-center gap-1.5 text-xs text-fg-muted sm:hidden">
+      <!-- Line 2 on mobile only: the columns that are dropped below `md`. -->
+      <span class="flex items-center gap-1.5 text-xs text-fg-muted md:hidden">
         <span>{modifiedLabel}</span>
         <span aria-hidden="true">·</span>
         <span>{file === null ? 'Folder' : sizeLabel}</span>
@@ -187,23 +200,27 @@
       label="Actions for {item.name}"
       size="sm"
       align="end"
-      class="-mr-1.5 shrink-0"
+      // The negative margin is what kept the 36px glyph from crowding the name,
+      // but it also pulled the button half out of the row's padding. Below `md`
+      // that margin is dropped so the whole 44px target stays inside the row and
+      // inside the viewport, rather than straddling the edge.
+      class="shrink-0 md:-mr-1.5"
       onclick={openContextMenu}
       icon={EllipsisVertical}
     />
   </div>
 
   <!-- Cells 2-4: desktop/tablet columns, absent from the mobile layout. -->
-  <span class="hidden min-w-0 truncate text-sm text-fg-muted sm:block" title={ownerLabel}>
+  <span class="hidden min-w-0 truncate text-sm text-fg-muted md:block" title={ownerLabel}>
     {ownerLabel}
   </span>
-  <span class="hidden min-w-0 truncate text-sm text-fg-muted sm:block" title={modifiedFull}>
+  <span class="hidden min-w-0 truncate text-sm text-fg-muted md:block" title={modifiedFull}>
     {modifiedLabel}
   </span>
-  <span class="hidden min-w-0 truncate text-sm text-fg-muted tabular-nums sm:block">{sizeLabel}</span>
+  <span class="hidden min-w-0 truncate text-sm text-fg-muted tabular-nums md:block">{sizeLabel}</span>
 
   <!-- Cell 5: status only, so it never shifts the columns when it appears. -->
-  <span class="hidden min-w-0 justify-end sm:flex">
+  <span class="hidden min-w-0 justify-end md:flex">
     {#if file?.uploadStatus === 'failed'}
       <Badge tone="danger" size="sm" dot>Failed</Badge>
     {:else if file !== null && file.uploadStatus !== 'committed'}

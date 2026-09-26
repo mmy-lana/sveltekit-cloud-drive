@@ -76,8 +76,6 @@ export interface UploadTask extends UploadTaskProgress {
   readonly taskId: string;
   /** Destination at enqueue time, so navigating away mid-flight is harmless. */
   readonly targetFolderId: string | null;
-  /** Live transfer handle, for pause, resume and cancel. */
-  upload: StorageUploadTask | null;
   /** True once the user has asked for a cancel that has not landed yet. */
   cancelRequested: boolean;
   /** The `items/{id}` document, once phase 1 has created it. */
@@ -102,6 +100,38 @@ export class UploadQueueStore {
   /** Tasks the user asked to pause, so the abort is not read as a failure. */
   /** Tasks the user paused, so the resulting rejection is not read as failure. */
   #pauseRequests = new Set<string>();
+
+  /**
+   * Live transfer handles, keyed by row id, held outside the reactive graph.
+   *
+   * A `StorageUploadTask` is a live object: it holds the xhr/fetch upload, a
+   * resumable session URL, byte counters and a state machine that mutates on
+   * every progress tick. Keeping it on a `$state` row made all of that
+   * reactive, which is wrong in three separate ways.
+   *
+   * 1. *It is not data.* Every mutation the SDK makes to the handle — the byte
+   *    counter ticking, the internal state flipping to `paused` — re-entered
+   *    Svelte's graph and invalidated every subscriber of the row, so a
+   *    transfer that reports progress 200 times a second caused 200 invalidations
+   *    per second of the entire queue panel, not of the one row that changed.
+   * 2. *It cannot be deeply proxied safely.* `$state` wraps objects in a proxy,
+   *    and a proxy around an object the SDK also mutates by identity produces
+   *    two views of one upload. Methods invoked through the proxy can read
+   *    `this` as the proxy, and `uploadBytesResumable` resolves its own promise
+   *    against the original — so `pause()` through the reactive view was not
+   *    guaranteed to pause the transfer the run loop is awaiting.
+   * 3. *It is dropped on the terminal path either way, but only by luck.* The
+   *    handle is now released in `#run`'s `finally` alongside the concurrency
+   *    slot, so an attempt that throws, is cancelled, or is superseded cannot
+   *    strand it. The invariant is explicit rather than incidental: a row and
+   *    its handle are created together and torn down together.
+   *
+   * `pause`, `resume` and `cancel` are the only consumers, and they are all
+   * called imperatively from user input, so nothing about the UI needs the
+   * handle to be reactive. Progress reaches the UI through the throttled
+   * `bytesTransferred`/`status` fields that are genuinely data.
+   */
+  #activeUploads = new Map<string, StorageUploadTask>();
 
   /** Every row, oldest first. */
   get tasks(): readonly UploadTask[] {
@@ -198,7 +228,6 @@ export class UploadQueueStore {
         status: 'pending',
         errorMessage: null,
         targetFolderId,
-        upload: null,
         cancelRequested: false,
         itemId: null,
         sessionId: null,
@@ -225,8 +254,9 @@ export class UploadQueueStore {
     const task = this.#find(taskId);
     if (task === null || task.isSettled) return;
 
-    if (task.upload !== null) {
-      task.upload.pause();
+    const upload = this.#activeUploads.get(taskId);
+    if (upload !== undefined) {
+      upload.pause();
       task.status = 'paused';
       return;
     }
@@ -250,8 +280,9 @@ export class UploadQueueStore {
 
     this.#pauseRequests.delete(taskId);
 
-    if (task.upload !== null) {
-      task.upload.resume();
+    const upload = this.#activeUploads.get(taskId);
+    if (upload !== undefined) {
+      upload.resume();
       task.status = 'uploading';
       return;
     }
@@ -268,10 +299,11 @@ export class UploadQueueStore {
 
     task.cancelRequested = true;
 
-    if (task.upload !== null) {
+    const upload = this.#activeUploads.get(taskId);
+    if (upload !== undefined) {
       // `cancel()` rejects the task's promise with `storage/canceled`, which
       // the run loop treats as a user abort and compensates for.
-      task.upload.cancel();
+      upload.cancel();
       return;
     }
 
@@ -374,7 +406,11 @@ export class UploadQueueStore {
       this.#settleAsError(task, this.#describeFailure(task, error));
     } finally {
       this.#releaseSlot();
-      task.upload = null;
+      // Drop the non-reactive handle in the same place the slot is dropped, so
+      // a finished attempt releases both its concurrency slot and the strong
+      // reference to its transfer. Nothing outside this method can observe the
+      // task after this point, which is what makes the map the correct owner.
+      this.#activeUploads.delete(task.taskId);
     }
   }
 
@@ -477,8 +513,13 @@ export class UploadQueueStore {
    *
    * The SDK's `UploadTask` is used directly rather than wrapped: it is the only
    * object that supports a real pause, and re-implementing one over
-   * `uploadBytes` would lose that for no benefit. Progress events arrive far
-   * faster than a row can usefully repaint, so they are sampled.
+   * `uploadBytes` would lose that for no benefit. It is published to
+   * `#activeUploads` and never onto the row, so that neither the SDK's internal
+   * state machine nor its byte counter is inside the reactive graph — see the
+   * field's comment for why that matters.
+   *
+   * Progress events arrive far faster than a row can usefully repaint, so they
+   * are sampled; the fields that do land on the row are the only reactive ones.
    */
   async #transfer(
     task: UploadTask,
@@ -492,7 +533,7 @@ export class UploadQueueStore {
       file,
       { contentType: task.mimeType }
     );
-    task.upload = upload;
+    this.#activeUploads.set(task.taskId, upload);
 
     let lastSample = 0;
     let lastBytes = 0;
@@ -557,6 +598,18 @@ export class UploadQueueStore {
     const sessionId = task.sessionId;
     const sizeBytes = task.sizeBytes;
 
+    // Self-heal the lifecycle before committing against it.
+    //
+    // The document is `uploading` on the normal path, because `#transfer` has
+    // already promoted it. It can still be `reserved` on entry if that promotion
+    // was lost, and `reserved -> committed` is a transition the rules do not
+    // allow. Rather than ask the rules to permit a commit that skips the state
+    // which asserts the bytes are in Storage, perform the promotion the rules do
+    // sanction and commit from `uploading`. The call is a no-op when the status
+    // is already correct, so this costs one extra transaction read on the happy
+    // path and turns an unrecoverable failure into a recoverable one.
+    await markUploading(itemId, sessionId);
+
     await runBoundedTransaction(db, async (tx) => {
       const itemSnapshot = await tx.get(doc(db, 'items', itemId));
       if (!itemSnapshot.exists()) {
@@ -564,6 +617,14 @@ export class UploadQueueStore {
       }
       if (itemSnapshot.data().uploadSessionId !== sessionId) {
         throw new SupersededUploadError();
+      }
+      // Belt and braces: the state machine permits `uploading -> committed` and
+      // nothing else into `committed`, so refuse rather than issue a write the
+      // rules will reject on every one of the bounded transaction's retries.
+      if (itemSnapshot.data().uploadStatus !== 'uploading') {
+        throw new Error(
+          `The upload could not be committed because the file is "${itemSnapshot.data().uploadStatus}" rather than uploading.`
+        );
       }
 
       const ledger = await readLedger(tx, uid);
@@ -774,22 +835,49 @@ function resolveUploadMimeType(file: { name: string; type: string }): string {
   return `application/${extension.toLowerCase()}`;
 }
 
-/** Mark a document as transferring, ignoring an attempt that lost its claim. */
+/**
+ * Move a document from `reserved` to `uploading`, or confirm it is already there.
+ *
+ * ## Why this is strict, and why the commit phase calls it again
+ *
+ * This function used to swallow every failure, on the reasoning that a missed
+ * status write was cosmetic "because `reserved -> committed` is itself a legal
+ * transition". That reasoning was wrong, and the rules say so: `isLegalStatusTransition`
+ * admits `reserved -> uploading`, `reserved -> failed` and
+ * `reserved -> deletion-pending`, and nothing else. `reserved -> committed` is
+ * denied, and the verification suite asserts that it is.
+ *
+ * So the swallowed error did not make the write cosmetic — it deferred the
+ * failure to a place it could not be recovered from. The document stayed
+ * `reserved`, the transfer ran to completion, and then `#commit` attempted the
+ * one transition the rules forbid. That write fails identically on every retry
+ * of the bounded transaction, so the user was shown a failed upload for a file
+ * whose bytes were fully transferred, and the compensation path then deleted
+ * those bytes. The upload was not cosmetic; it was the only thing standing
+ * between a lost upload and a permanently `reserved` document holding a quota
+ * reservation.
+ *
+ * Two changes follow from the state machine being what it is:
+ *
+ * - The failure is not swallowed. A `reserved` document that cannot be promoted
+ *   must fail here, before a single byte is sent, rather than after.
+ * - `#commit` calls this first. The status can be `reserved` on entry if the
+ *   earlier promotion was lost, and the fix is to perform the transition the
+ *   rules do sanction rather than to weaken the rules. The promotion is a no-op
+ *   when the document is already `uploading`, so the retry is free.
+ */
 async function markUploading(itemId: string, sessionId: string): Promise<void> {
   const db: Firestore = getFirestoreClient();
-  try {
-    await runTransaction(db, async (tx) => {
-      const snapshot = await tx.get(doc(db, 'items', itemId));
-      if (!snapshot.exists() || snapshot.data().uploadSessionId !== sessionId) return;
-      tx.update(doc(db, 'items', itemId), {
-        uploadStatus: 'uploading',
-        updatedAt: serverTimestamp()
-      });
+  await runTransaction(db, async (tx) => {
+    const snapshot = await tx.get(doc(db, 'items', itemId));
+    if (!snapshot.exists() || snapshot.data().uploadSessionId !== sessionId) return;
+    if (snapshot.data().uploadStatus !== 'reserved') return;
+
+    tx.update(doc(db, 'items', itemId), {
+      uploadStatus: 'uploading',
+      updatedAt: serverTimestamp()
     });
-  } catch {
-    // A missed status write is cosmetic: the commit phase re-asserts the
-    // session id, and `reserved -> committed` is itself a legal transition.
-  }
+  });
 }
 
 /** The single upload queue. */

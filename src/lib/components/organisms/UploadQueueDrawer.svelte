@@ -14,6 +14,8 @@
    */
   import {
     Check,
+    ChevronDown,
+    ChevronUp,
     Ellipsis,
     LoaderCircle,
     Pause,
@@ -106,20 +108,37 @@
           label={store.isExpanded ? 'Collapse upload queue' : 'Expand upload queue'}
           size="sm"
           variant="ghost"
-          icon={store.isExpanded ? Ellipsis : Ellipsis}
+          aria-expanded={store.isExpanded}
+          aria-controls="upload-queue-list"
+          icon={store.isExpanded ? ChevronDown : ChevronUp}
           onclick={() => store.toggle()}
         />
       </div>
     {/if}
   </header>
 
-  {#if store.isUploading}
-    <div class="border-b border-gray-100 px-4 py-2 dark:border-gray-800">
-      <ProgressBar value={store.aggregateProgress} label="Overall upload progress" size="sm" />
-    </div>
-  {/if}
+  <!--
+    Collapsed by unmounting, not by height.
 
-  <ul class="flex-1 overflow-y-auto overscroll-contain">
+    A height/overflow collapse leaves the rows in the DOM at their full size with
+    the container clipped, so every per-row button inside is still laid out and
+    still focusable — a keyboard user tabs into a list they cannot see, and a
+    pointer user on the row underneath can be handed a click to a button that is
+    not visible. `{#if}` removes the subtree, so the collapsed drawer is exactly
+    the header and nothing else.
+
+    The trade-off is that there is no animation. It is the right one here: the
+    alternative is an `aria-hidden` box full of live controls, which is a worse
+    accessibility defect than a missing transition.
+  -->
+  {#if store.isExpanded}
+    {#if store.isUploading}
+      <div class="border-b border-gray-100 px-4 py-2 dark:border-gray-800">
+        <ProgressBar value={store.aggregateProgress} label="Overall upload progress" size="sm" />
+      </div>
+    {/if}
+
+    <ul id="upload-queue-list" class="flex-1 overflow-y-auto overscroll-contain">
     {#each store.tasks as task (task.taskId)}
       <li class="border-b border-gray-50 px-4 py-3 last:border-b-0 dark:border-gray-800/60">
         <div class="flex items-start gap-2">
@@ -210,7 +229,8 @@
         Nothing in the queue.
       </li>
     {/each}
-  </ul>
+    </ul>
+  {/if}
 </section>
 
 {#if open && menuTaskId !== null && menuAnchor !== null}

@@ -96,6 +96,46 @@ function getEmulatorHost(): string {
 }
 
 /**
+ * Hostname that mirrors the page the SDK is running in.
+ *
+ * `PUBLIC_EMULATOR_HOST` is a *deployment* setting: it names where the suite
+ * lives for whoever configured the environment, and `localhost` is the value
+ * that ships in `.env`. That is the wrong host for every developer who reaches
+ * the app by any other name, and the mismatch is silent — the suite is on the
+ * same machine, the ports are published on `0.0.0.0`, so the requests do not
+ * fail, they are simply *cross-origin*: `127.0.0.1` is not `localhost` to a
+ * browser, and neither is a LAN address or a Docker bridge alias.
+ *
+ * The rule that removes the whole class of problem: point the emulator at the
+ * same hostname the page was served from, whenever the suite is not being
+ * addressed deliberately. Then the requests are same-origin, and neither a CORS
+ * preflight nor an origin check in the suite can reject them.
+ *
+ * `PUBLIC_EMULATOR_HOST` still wins when it is set, because that is the escape
+ * hatch for a genuinely remote suite (a shared host, a tunnel, a second
+ * machine) where the page hostname is not the suite hostname at all.
+ */
+function getBrowserEmulatorHost(): string {
+  if (!browser) return getEmulatorHost();
+
+  const configured = (env.PUBLIC_EMULATOR_HOST ?? '').trim();
+  if (configured.length > 0) return getEmulatorHost();
+
+  const hostname = window.location.hostname.trim();
+  if (hostname.length === 0) return 'localhost';
+
+  // `localhost`, `::1` and `0.0.0.0` are all the loopback interface and are
+  // reached identically, so normalising them to one spelling keeps the
+  // diagnostics output stable regardless of how the developer typed the URL.
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]') {
+    return 'localhost';
+  }
+  if (hostname === '0.0.0.0') return 'localhost';
+
+  return hostname;
+}
+
+/**
  * Resolve the public config.
  *
  * When the emulator is enabled, deterministic `mock-*` placeholders keep a
@@ -226,7 +266,7 @@ export function getFirebase(): FirebaseClients {
 
   const isEmulator = isEmulatorEnabled();
   if (isEmulator) {
-    const host = getEmulatorHost();
+    const host = getBrowserEmulatorHost();
     connectAuthEmulatorOnce(auth, host);
     connectFirestoreEmulatorOnce(db, host);
     connectStorageEmulatorOnce(storage, host);
@@ -282,7 +322,7 @@ export function getFirebaseRuntimeStatus(): FirebaseRuntimeStatus {
     isEmulator: emulator,
     projectId: env.PUBLIC_FIREBASE_PROJECT_ID?.trim() || 'mock-drive-system',
     storageBucket: env.PUBLIC_FIREBASE_STORAGE_BUCKET?.trim() || 'mock-drive-system.appspot.com',
-    emulatorHost: emulator ? getEmulatorHost() : null,
+    emulatorHost: emulator ? getBrowserEmulatorHost() : null,
     authPort: EMULATOR_PORTS.auth,
     firestorePort: EMULATOR_PORTS.firestore,
     storagePort: EMULATOR_PORTS.storage,

@@ -1,0 +1,37 @@
+# Emulator suite image for sveltekit-cloud-drive.
+#
+# The published `spine3/firebase-emulator` image pins firebase-tools 9.17.0 (2021,
+# Node 14). The Firestore web SDK that this app ships (firebase 12.x) authenticates
+# its gRPC-web "webchannel" streams by encoding the init message headers into the
+# request *body* rather than the `Authorization` header, so that the browser does
+# not have to pay a CORS preflight. The 2021 Firestore emulator does not decode
+# that encoding, so every browser read and write arrives anonymous and the rules
+# deny it with `permission-denied` — while Node clients, which use native gRPC
+# metadata, pass. That asymmetry is what made this look like an application bug.
+#
+# This image runs the current firebase-tools on a current Node, which understands
+# the transport the SDK actually speaks.
+#
+# Trixie rather than bookworm for one reason: firebase-tools refuses to start on
+# a JRE older than 21, and bookworm only carries openjdk-17. Trixie ships 21.
+FROM node:22-trixie-slim
+
+ARG FIREBASE_TOOLS_VERSION=15.31.0
+
+# `java` is required by the Firestore emulator; the slim base has none.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends openjdk-21-jre-headless ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install --global --no-fund --no-audit "firebase-tools@${FIREBASE_TOOLS_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
+
+WORKDIR /firebase
+
+# Reachable from a containerised dev server or a device on the LAN, not just
+# from localhost, so the ports are published on every interface (see
+# docker-compose.yml).
+EXPOSE 4000 8080 9099 9199 4400
+
+ENTRYPOINT ["firebase", "emulators:start", "--project", "mock-drive-system", "--only", "auth,firestore,storage,ui"]

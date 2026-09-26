@@ -282,12 +282,20 @@ service cloud.firestore {
       allow create: if isSelf(userId)
         && request.resource.data.uid == userId
         && isBoundedString(request.resource.data.email, 320)
-        && isNonEmptyString(request.resource.data.displayName, 128)
+        && isBoundedString(request.resource.data.displayName, 128)
         && isTimestampField(request.resource.data.createdAt)
         && isTimestampField(request.resource.data.updatedAt)
+        // A ledger is only ever *born* empty. Allowing a client to create an
+        // account that already claims spent or reserved bytes would mint a
+        // negative-capacity account that no later write can ever satisfy.
         && request.resource.data.quota.usedBytes == 0
         && request.resource.data.quota.reservedBytes == 0
-        && isNonNegativeInt(request.resource.data.quota.totalBytes);
+        // ...and it must be born with a real ceiling. `isNonNegativeInt` alone
+        // accepts `totalBytes: 0`, which permanently bricks the account:
+        // `quotaTotalIsProvisioned` pins the value on every later write, so the
+        // only remedy is the Admin SDK, and the client renders a drive it can
+        // never upload to.
+        && request.resource.data.quota.totalBytes > 0;
 
       allow update: if isSelf(userId)
         && request.resource.data.uid == userId

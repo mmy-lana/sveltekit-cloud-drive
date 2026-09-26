@@ -681,7 +681,7 @@ export class DriveStore {
         await assertWritableParent(tx, parentFolderId);
       });
 
-      await runNameTransaction(uid, parentFolderId, new Set(), validation.name, (tx, resolved) => {
+      await runNameTransaction(uid, parentFolderId, new Set(), folderId, validation.name, (tx, resolved) => {
         tx.set(doc(db, 'items', folderId), {
           id: folderId,
           name: resolved.name,
@@ -745,6 +745,7 @@ export class DriveStore {
         uid,
         item.parentFolderId,
         new Set([itemId]),
+        itemId,
         validation.name,
         (tx, resolved) => {
           tx.update(doc(db, 'items', itemId), {
@@ -814,7 +815,7 @@ export class DriveStore {
       // identically named files does not make them collide with each other.
       for (const item of moving) {
         if (isDriveFolder(item)) continue;
-        await runNameTransaction(uid, destinationId, movingIds, item.name, (tx, resolved) => {
+        await runNameTransaction(uid, destinationId, movingIds, item.id, item.name, (tx, resolved) => {
           tx.update(doc(db, 'items', item.id), {
             parentFolderId: destinationId,
             ...(resolved.name === item.name ? {} : {
@@ -1342,22 +1343,49 @@ async function readSiblingIds(
  *    to the transaction, and this is what catches it — the write is retried with
  *    the name now in the taken set, so the loop converges on a free name rather
  *    than leaving two items sharing a key.
+ *
+ * ## Why `selfId` is its own argument
+ *
+ * Step 3 is looking for a *rival* that took the name we chose. The document
+ * `write` just created is not a rival — it is the one holding the name, and it
+ * will be in its own sibling list because the sibling list is exactly "everything
+ * under this parent, and this is under this parent".
+ *
+ * `excludeIds` cannot express that, because it exists for a different reason:
+ * the items of a bulk move, which are being moved *into* the destination and
+ * must not collide with each other. A create has no such exclusion, so it
+ * passed an empty set — and the re-check then matched the document the call had
+ * just written, every single time. The result was not a rare race but a total
+ * failure of folder creation: three attempts, committing "Reports", "Reports (1)"
+ * and "Reports (2)" in turn, and then throwing "Could not find a free name for
+ * this item." The user was told the folder was not created while three of them
+ * sat in the drive.
  */
 async function runNameTransaction(
   uid: string,
   parentFolderId: string | null,
   excludeIds: ReadonlySet<string>,
+  selfId: string,
   desiredName: string,
   write: (tx: Transaction, resolved: ResolvedName) => void
 ): Promise<ResolvedName> {
   const db = getFirestoreClient();
-  const taken = new Set<string>();
   let resolved: ResolvedName = {
     name: desiredName,
     normalized: normalizeItemName(desiredName)
   };
 
   for (let attempt = 0; attempt < NAME_RESOLUTION_ATTEMPTS; attempt += 1) {
+    // Rebuilt per attempt, and never carried across.
+    //
+    // The set is a picture of the siblings that existed when this attempt read
+    // them. Reusing the previous attempt's set meant a name added to it by step
+    // 3 stayed forbidden on the next pass, and a sibling that was renamed or
+    // trashed in between stayed forbidden forever, even though the name was now
+    // free. Both push the resolver up the suffix ladder, so a retry produced
+    // "Reports (1)" rather than the correct answer, and the ladder only ever
+    // grew.
+    const taken = new Set<string>();
     const siblingIds = await readSiblingIds(uid, parentFolderId, excludeIds);
 
     await runBoundedTransaction(db, async (tx) => {
@@ -1375,8 +1403,15 @@ async function runNameTransaction(
       write(tx, resolved);
     });
 
-    // Step 3: confirm against the state the commit actually produced.
-    const occupied = await readSiblingIds(uid, parentFolderId, excludeIds);
+    // Step 3: confirm against the state the commit actually produced, looking
+    // only for other documents. `selfId` is excluded on top of `excludeIds`
+    // because it is the document `write` just produced, and a create is not in
+    // `excludeIds` for the reason given above.
+    const occupied = await readSiblingIds(
+      uid,
+      parentFolderId,
+      new Set<string>([...excludeIds, selfId])
+    );
     const settled = await Promise.all(
       occupied.map((id) => getDoc(doc(db, 'items', id)))
     );
@@ -1384,8 +1419,6 @@ async function runNameTransaction(
       (snapshot) => snapshot.exists() && snapshot.data().normalizedName === resolved.normalized
     );
     if (clashes.length === 0) return resolved;
-
-    taken.add(resolved.normalized);
   }
 
   throw new Error('Could not find a free name for this item.');

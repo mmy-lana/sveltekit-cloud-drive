@@ -62,7 +62,13 @@
     .filter(Boolean)
     .join(' ')}
 >
-  <span class="relative inline-flex shrink-0 items-center justify-center">
+  <!--
+    The visible box is 16-24px, which is a drawing, not a target: the input is
+    stretched over this wrapper, so the wrapper's box is the real hit area.
+    `tap-target-compact` raises it to 44x44 below 768px, where the label is
+    often the only way to select a row and the surface scrolls under the finger.
+  -->
+  <span class="relative inline-flex shrink-0 items-center justify-center tap-target-compact">
     <input
       {...rest}
       {id}

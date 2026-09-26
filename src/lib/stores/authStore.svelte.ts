@@ -22,7 +22,7 @@ import {
 } from 'firebase/auth';
 import {
   doc,
-  getDoc,
+  getDocFromServer,
   onSnapshot,
   serverTimestamp,
   setDoc,
@@ -175,10 +175,27 @@ class AuthStore {
   /**
    * Create the profile document if it is missing, then subscribe to it.
    *
-   * The `setDoc` merge is safe to re-run: a failure halfway through leaves
-   * either no document or the complete document, and a retry converges. That is
-   * what {@link retryProfile} leans on — the same call, one turn later, after
-   * whatever broke the first time has been fixed.
+   * ## Why this is a create, never a merge
+   *
+   * The payload below carries `quota: { usedBytes: 0, reservedBytes: 0, ... }`.
+   * A merge write applies *every* field it is given, so a merge against a
+   * profile that already exists resets the caller's ledger to zero. `getDoc` is
+   * served from the local cache, so "does not exist" is a statement about the
+   * cache, not about the server: a second tab, a device that has been offline,
+   * or simply a snapshot that has not landed yet is enough to make it stale.
+   *
+   * That write is *permitted* by `firestore.rules`. `quotaLedgerIsBalanced`
+   * accepts a fall in `usedBytes` whenever `reservedBytes` is untouched, which
+   * is the shape a legitimate permanent delete has — so the rules cannot tell
+   * a reclaimed file from a ledger that was simply overwritten. The result is
+   * that a stale read followed by a merge silently destroys the account's usage
+   * accounting, and the bytes become invisible to quota accounting forever.
+   *
+   * The guard is therefore local and strict: provision only a document that the
+   * *server* says does not exist, and write it with a plain `setDoc`, so the
+   * write is a `create` and is evaluated against `allow create` — which pins
+   * `usedBytes == 0` and `reservedBytes == 0` as an invariant of provisioning
+   * rather than a value a client may reassert at will.
    */
   async #bindProfile(user: User): Promise<void> {
     const db = getFirestoreClient();
@@ -198,27 +215,30 @@ class AuthStore {
     );
 
     try {
-      const existing = await getDoc(profileRef);
-      if (existing.exists()) return;
+      // `getDocFromServer` rather than `getDoc`: a cached "missing" answer is
+      // the exact condition that turns a merge into a ledger reset, so the
+      // existence check has to be the server's answer and not the cache's.
+      const existing = await getDocFromServer(profileRef);
+      if (existing.exists()) {
+        this.#profileError = null;
+        return;
+      }
 
-      await setDoc(
-        profileRef,
-        {
-          // Mirrors the document id. The rules compare this field to the path
-          // segment, which is what proves ownership without trusting `auth.uid`
-          // to survive a rules-test context.
-          uid: user.uid,
-          email: user.email ?? '',
-          displayName: deriveDisplayName(user),
-          photoURL: user.photoURL ?? null,
-          // Written once, at account creation. `firestore.rules` pins
-          // `totalBytes` on every later write, so this ceiling is final.
-          quota: { usedBytes: 0, reservedBytes: 0, totalBytes: DEFAULT_QUOTA_BYTES },
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp()
-        },
-        { merge: true }
-      );
+      await setDoc(profileRef, {
+        // Mirrors the document id. The rules compare this field to the path
+        // segment, which is what proves ownership without trusting `auth.uid`
+        // to survive a rules-test context.
+        uid: user.uid,
+        email: user.email ?? '',
+        displayName: deriveDisplayName(user),
+        photoURL: user.photoURL ?? null,
+        // Written once, at account creation. `firestore.rules` pins
+        // `totalBytes` on every later write, so this ceiling is final.
+        quota: { usedBytes: 0, reservedBytes: 0, totalBytes: DEFAULT_QUOTA_BYTES },
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      this.#profileError = null;
     } catch (error) {
       this.#profileError = classifyError(error);
     }

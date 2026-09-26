@@ -223,6 +223,23 @@
     min-height: var(--tap-target);
   }
 
+  /* 44x44 minimum for compact controls on narrow viewports.
+     A dense toolbar button is sized for a precise pointer, where 36px is a
+     reasonable hit area next to its neighbours. On a phone it is not: the
+     target sits in a scroll surface that moves under the finger, so there is
+     no second chance and no cursor to correct with. Below 768px the compact
+     sizes give up their 36px footprint and take the full target.
+
+     Expressed with `min-*` rather than `width`/`height` so it wins over the
+     `h-9 w-9` of a compact size without either utility needing to know about
+     the other: `min-height` is resolved after `height` per the cascade. */
+  @media (width < 48rem) {
+    .tap-target-compact {
+      min-width: var(--tap-target);
+      min-height: var(--tap-target);
+    }
+  }
+
   .scrollbar-slim {
     scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent;
