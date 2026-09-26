@@ -1,36 +1,297 @@
 rules_version = '2';
+
+/**
+ * Firestore security rules for sveltekit-cloud-drive.
+ *
+ * Threat model: every read and every write originates from an untrusted web
+ * client. The guarantees below are transaction-independent — they hold for the
+ * Firestore client SDK, for raw REST calls, and for hand-crafted batches alike,
+ * because the backend re-evaluates them on every attempt.
+ *
+ * Trust boundary: the Admin SDK bypasses these rules by design. Anything that
+ * must be unconditionally trustworthy (quota provisioning, billing) lives
+ * behind that boundary, never in a client write.
+ */
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isAuthenticated() {
+
+    /* ---------------------------------------------------------------- */
+    /* Primitives                                                        */
+    /* ---------------------------------------------------------------- */
+
+    function isSignedIn() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    function isSelf(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function itemsPath(itemId) {
+      return /databases/$(database)/documents/items/$(itemId);
+    }
+
+    function isTimestampField(value) {
+      return value is timestamp;
+    }
+
+    function isNonEmptyString(value, maxLength) {
+      return value is string && value.size() > 0 && value.size() <= maxLength;
+    }
+
+    function isBoolField(value) {
+      return value is bool;
+    }
+
+    function isNonNegativeInt(value) {
+      return value is int && value >= 0;
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Shared item validation                                             */
+    /* ---------------------------------------------------------------- */
+
+    /**
+     * `normalizedName` is the sibling-collision key derived client-side from
+     * `name.normalize('NFC').trim().toLowerCase()`. Security rules cannot run
+     * Unicode normalisation, so the enforceable invariants are that both fields
+     * exist, are non-empty, are bounded, and that the normalized form is never
+     * longer than the raw form — normalisation can only shrink or preserve
+     * length, so a longer key would prove the two came from different inputs.
+     */
+    function hasConsistentNaming(data) {
+      return isNonEmptyString(data.name, 255)
+        && isNonEmptyString(data.normalizedName, 255)
+        && data.normalizedName.size() <= data.name.size();
+    }
+
+    /**
+     * A parent is either `null` (the drive root) or an existing, owned,
+     * non-trashed folder. `getAfter` is used so a parent created in the same
+     * batch is visible to the rule.
+     */
+    function hasValidParent(parentId) {
+      return parentId == null
+        || (existsAfter(itemsPath(parentId))
+          && getAfter(itemsPath(parentId)).data.ownerId == request.auth.uid
+          && getAfter(itemsPath(parentId)).data.type == 'folder'
+          && getAfter(itemsPath(parentId)).data.isTrashed == false);
+    }
+
+    /** `isTrashed` and `trashedAt` must never disagree. */
+    function hasConsistentTrashState(data) {
+      return isBoolField(data.isTrashed)
+        && (data.isTrashed
+          ? isTimestampField(data.trashedAt)
+          : data.trashedAt == null);
+    }
+
+    /** Fields shared by both item types, checked on create and on update. */
+    function hasValidCommonFields(data) {
+      return data.ownerId == request.auth.uid
+        && hasConsistentNaming(data)
+        && hasValidParent(data.parentFolderId)
+        && hasConsistentTrashState(data)
+        && isBoolField(data.isStarred)
+        && isTimestampField(data.createdAt)
+        && isTimestampField(data.updatedAt);
+    }
+
+    /** Extra payload required by a folder document. */
+    function hasValidFolderPayload(data) {
+      return data.color == null
+        || (data.color is string && data.color.size() <= 32);
+    }
+
+    /** Extra payload required by a file document. */
+    function hasValidFilePayload(data) {
+      return isNonNegativeInt(data.sizeBytes)
+        && isNonEmptyString(data.mimeType, 255)
+        && isNonEmptyString(data.storagePath, 1024)
+        && data.uploadStatus in [
+          'reserved', 'uploading', 'uploaded', 'committed', 'failed', 'deletion-pending'
+        ]
+        && isNonEmptyString(data.uploadSessionId, 64)
+        && isBoolField(data.isStarred);
+    }
+
+    /**
+     * Directed graph of legal upload-status transitions, mirroring
+     * `UPLOAD_STATUS_TRANSITIONS` in `src/lib/types/drive.ts`.
+     *
+     * `deletion-pending` has no outgoing edge by construction: once the
+     * tombstone is written, only the hard delete may follow.
+     */
+    function isLegalStatusTransition(from, to) {
+      return (from == 'reserved' && to in ['uploading', 'failed', 'deletion-pending'])
+        || (from == 'uploading' && to in ['uploaded', 'committed', 'failed', 'deletion-pending'])
+        || (from == 'uploaded' && to in ['committed', 'failed', 'deletion-pending'])
+        || (from == 'committed' && to == 'deletion-pending')
+        || (from == 'failed' && to in ['uploading', 'deletion-pending']);
+    }
+
+    /**
+     * Identity is immutable for the lifetime of a document: a client can never
+     * hand an item to another owner, nor mutate a file into a folder to slip
+     * past a type-specific check.
+     */
+    function hasImmutableIdentity(data) {
+      return data.ownerId == resource.data.ownerId
+        && data.type == resource.data.type
+        && data.id == resource.data.id
+        && data.createdAt == resource.data.createdAt;
+    }
+
+    /**
+     * A file's byte count, storage path and owning session are fixed at
+     * reservation time. Only a document still in `reserved` may adjust them,
+     * which is what stops a stale in-flight attempt from rewriting the size of
+     * an already-committed file.
+     */
+    function hasStableFilePayload(data) {
+      return (data.sizeBytes == resource.data.sizeBytes
+          && data.storagePath == resource.data.storagePath
+          && data.uploadSessionId == resource.data.uploadSessionId)
+        || resource.data.uploadStatus == 'reserved';
+    }
+
+    /** Once tombstoned, a document is frozen: only the hard delete may follow. */
+    function isNotTombstoned() {
+      return resource.data.type != 'file'
+        || resource.data.uploadStatus != 'deletion-pending';
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* users/{userId} — the quota ledger                                  */
+    /* ---------------------------------------------------------------- */
+
+    /**
+     * `totalBytes` is provisioned out of band (Admin SDK or console) and is
+     * immutable for every client write, so a user can never grant themselves
+     * storage by patching their own document.
+     */
+    function quotaTotalIsProvisioned() {
+      return request.resource.data.quota.totalBytes == resource.data.quota.totalBytes;
+    }
+
+    function quotaIsSane() {
+      return isNonNegativeInt(request.resource.data.quota.usedBytes)
+        && isNonNegativeInt(request.resource.data.quota.reservedBytes)
+        && isNonNegativeInt(request.resource.data.quota.totalBytes);
+    }
+
+    /** The capacity invariant, re-asserted on every single write. */
+    function quotaFitsCapacity() {
+      return request.resource.data.quota.usedBytes
+        + request.resource.data.quota.reservedBytes
+        <= request.resource.data.quota.totalBytes;
+    }
+
+    /**
+     * Bytes may only ever be *moved* inside the ledger, never conjured:
+     *
+     * - `usedBytes` may rise only by an equal fall of `reservedBytes`
+     *   (a reservation promoted to a commit),
+     * - `usedBytes` may fall only while `reservedBytes` is untouched
+     *   (bytes reclaimed after a completed permanent delete),
+     * - `reservedBytes` may move freely while `usedBytes` is untouched
+     *   (a reservation is taken, or released on failure).
+     *
+     * The upload pipeline performs exactly one quota-relevant item per
+     * transaction, so the promote-move is an exact equality rather than a
+     * bound. A single write that both promotes one file and releases a
+     * different failed reservation is rejected and must be split in two.
+     */
+    function quotaLedgerIsBalanced() {
+      let usedDelta = request.resource.data.quota.usedBytes - resource.data.quota.usedBytes;
+      let reservedDelta = request.resource.data.quota.reservedBytes - resource.data.quota.reservedBytes;
+      return (usedDelta > 0 && reservedDelta == -usedDelta)
+        || (usedDelta <= 0 && reservedDelta == 0);
     }
 
     match /users/{userId} {
-      allow read: if isOwner(userId);
-      allow create: if isOwner(userId);
-      allow update: if isOwner(userId)
-        && request.resource.data.quota.totalBytes == resource.data.quota.totalBytes
-        && request.resource.data.quota.reservedBytes >= 0
-        && request.resource.data.quota.usedBytes >= 0
-        && (request.resource.data.quota.usedBytes + request.resource.data.quota.reservedBytes) <= resource.data.quota.totalBytes;
+      allow read: if isSelf(userId);
+
+      /**
+       * Provisioning: an account may only ever start with an empty ledger and a
+       * non-negative ceiling. Setting that ceiling is a server-side action.
+       */
+      allow create: if isSelf(userId)
+        && request.resource.data.uid == userId
+        && isNonEmptyString(request.resource.data.email, 320)
+        && isNonEmptyString(request.resource.data.displayName, 128)
+        && isTimestampField(request.resource.data.createdAt)
+        && isTimestampField(request.resource.data.updatedAt)
+        && request.resource.data.quota.usedBytes == 0
+        && request.resource.data.quota.reservedBytes == 0
+        && isNonNegativeInt(request.resource.data.quota.totalBytes);
+
+      allow update: if isSelf(userId)
+        && request.resource.data.uid == userId
+        && isTimestampField(request.resource.data.updatedAt)
+        && quotaTotalIsProvisioned()
+        && quotaIsSane()
+        && quotaFitsCapacity()
+        && quotaLedgerIsBalanced();
+
+      // Accounts are never deleted from the client: the ledger must stay auditable.
       allow delete: if false;
     }
 
+    /* ---------------------------------------------------------------- */
+    /* items/{itemId}                                                     */
+    /* ---------------------------------------------------------------- */
+
     match /items/{itemId} {
-      allow read: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-      allow create: if isAuthenticated()
-        && request.resource.data.ownerId == request.auth.uid
-        && (request.resource.data.type == 'file' || request.resource.data.type == 'folder')
-        && (request.resource.data.uploadStatus in ['reserved', 'committed']);
-      allow update: if isAuthenticated()
+      /**
+       * Ownership-scoped read. Collection queries must therefore filter on
+       * `ownerId`; a query that omits the filter is rejected, which is what
+       * keeps cross-account reads impossible even via a crafted query.
+       */
+      allow read: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && hasValidCommonFields(request.resource.data)
+        && (request.resource.data.type == 'folder'
+          ? hasValidFolderPayload(request.resource.data)
+          : (hasValidFilePayload(request.resource.data)
+            // A document is born `reserved`, or already `committed` when it is
+            // imported by trusted tooling. It can never be born tombstoned.
+            && request.resource.data.uploadStatus in ['reserved', 'committed']));
+
+      allow update: if isSignedIn()
         && resource.data.ownerId == request.auth.uid
-        && request.resource.data.ownerId == resource.data.ownerId
-        && request.resource.data.type == resource.data.type;
-      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+        && isNotTombstoned()
+        && hasImmutableIdentity(request.resource.data)
+        && hasValidCommonFields(request.resource.data)
+        && (request.resource.data.type == 'folder'
+          ? (hasValidFolderPayload(request.resource.data)
+            && request.resource.data.uploadStatus == resource.data.uploadStatus)
+          : (hasValidFilePayload(request.resource.data)
+            && hasStableFilePayload(request.resource.data)
+            && (request.resource.data.uploadStatus == resource.data.uploadStatus
+              || isLegalStatusTransition(
+                resource.data.uploadStatus,
+                request.resource.data.uploadStatus))));
+
+      /**
+       * Idempotent permanent deletion: a file may only be hard-deleted once its
+       * tombstone exists, and a folder only after it has been trashed. A client
+       * therefore cannot skip the Storage cleanup phase for a file.
+       */
+      allow delete: if isSignedIn()
+        && resource.data.ownerId == request.auth.uid
+        && (resource.data.type == 'file'
+          ? resource.data.uploadStatus == 'deletion-pending'
+          : resource.data.isTrashed == true);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Everything else is denied by default.                             */
+    /* ---------------------------------------------------------------- */
+
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

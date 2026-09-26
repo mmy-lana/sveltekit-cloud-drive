@@ -1,15 +1,40 @@
+# Local Firebase emulator suite for sveltekit-cloud-drive.
+#
+# The suite is pinned to the demo project `mock-drive-system` so rules evaluate
+# against a disposable namespace: no production project id is required to run
+# the app locally, and nothing here can reach real data.
+#
+#   docker compose up -d      # start the suite (UI on http://localhost:4000)
+#   docker compose logs -f    # tail emulator output
+#   docker compose down -v    # stop and wipe all emulator state
+
 services:
   firebase-emulator:
     image: spine3/firebase-emulator:latest
     container_name: sveltekit-drive-emulators
+    restart: unless-stopped
+    # Bind to every interface so the suite is reachable from a containerised
+    # dev server or from a device on the LAN, not just from localhost.
     ports:
-      - "4000:4000"
-      - "8080:8080"
-      - "9099:9099"
-      - "9199:9199"
+      - "0.0.0.0:4000:4000"   # Emulator UI
+      - "0.0.0.0:8080:8080"   # Firestore
+      - "0.0.0.0:9099:9099"   # Auth
+      - "0.0.0.0:9199:9199"   # Storage
     volumes:
-      - ./firebase.json:/firebase/firebase.json
-      - ./firestore.rules:/firebase/firestore.rules
-      - ./storage.rules:/firebase/storage.rules
+      - ./firebase.json:/firebase/firebase.json:ro
+      - ./firestore.rules:/firebase/firestore.rules:ro
+      - ./firestore.indexes.json:/firebase/firestore.indexes.json:ro
+      - ./storage.rules:/firebase/storage.rules:ro
+      # Persisted emulator state, so restarts keep seeded users and files.
+      - firebase-emulator-state:/firebase/emulator-state
     environment:
       - FIREBASE_PROJECT=mock-drive-system
+      # Accept logins from any origin; this suite is local-only by design.
+      - FIREBASE_AUTH_EMULATOR_HOST=0.0.0.0:9099
+      - FIREBASE_FIRESTORE_EMULATOR_HOST=0.0.0.0:8080
+      - FIREBASE_STORAGE_EMULATOR_HOST=0.0.0.0:9199
+      - GCLOUD_PROJECT=mock-drive-system
+
+volumes:
+  firebase-emulator-state:
+    driver: local

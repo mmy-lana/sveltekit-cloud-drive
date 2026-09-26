@@ -1,8 +1,60 @@
 rules_version = '2';
+
+/**
+ * Firebase Storage security rules for sveltekit-cloud-drive.
+ *
+ * Object layout mirrors `DriveFile.storagePath` exactly:
+ *
+ *   users/{uid}/{itemId}/{fileName}
+ *
+ * The authorisation rule is a prefix match: the first segment after `users/` is
+ * the caller's uid, so a user can only ever address their own subtree. Pinning
+ * `{itemId}` as its own segment also means one user cannot address another
+ * user's item by crafting a file name that embeds a path.
+ *
+ * Anything not matched below is denied by default.
+ */
 service firebase.storage {
   match /b/{bucket}/o {
-    match /users/{userId}/{allPaths=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /** Reject empty, over-long, or traversal-shaped path segments. */
+    function isSafeSegment(segment) {
+      return segment.size() > 0
+        && segment.size() <= 256
+        && !segment.matches('.*[\\\\/].*');
+    }
+
+    /**
+     * Writes are bounded at 5 MiB per object (the documented Storage ceiling
+     * for a single non-resumable write) and must declare a content type, so a
+     * mislabelled upload cannot be persisted as `image/png` for a `.exe` and
+     * later be served back to a browser as an image.
+     */
+    function isValidUpload(itemId, fileName) {
+      return isSafeSegment(itemId)
+        && isSafeSegment(fileName)
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType != null;
+    }
+
+    match /users/{userId}/{itemId}/{fileName} {
+      allow read: if isSelf(userId)
+        && isSafeSegment(itemId)
+        && isSafeSegment(fileName);
+
+      allow create, update: if isSelf(userId) && isValidUpload(itemId, fileName);
+
+      allow delete: if isSelf(userId)
+        && isSafeSegment(itemId)
+        && isSafeSegment(fileName);
     }
   }
 }

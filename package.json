@@ -7,21 +7,26 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsgo --tsconfig ./tsconfig.json",
+    "emulators:up": "docker compose up -d",
+    "emulators:logs": "docker compose logs -f firebase-emulator",
+    "emulators:down": "docker compose down",
+    "emulators:reset": "docker compose down -v"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "latest",
     "@sveltejs/kit": "latest",
     "@sveltejs/vite-plugin-svelte": "latest",
     "@tailwindcss/vite": "latest",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "svelte": "latest",
     "svelte-check": "latest",
     "tailwindcss": "latest",
-    "typescript": "latest",
+    "typescript": "~6.0.3",
     "vite": "latest"
   },
   "dependencies": {
-    "firebase": "latest",
-    "lucide-svelte": "latest"
+    "@lucide/svelte": "^1.48.0",
+    "firebase": "latest"
   }
 }
