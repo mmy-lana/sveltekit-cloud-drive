@@ -1,15 +1,254 @@
-@import "tailwindcss";
+@import 'tailwindcss';
+
+/* Class-based theming: the shell toggles `.dark` on <html> so a user choice
+   persists across routes, rather than following the OS setting implicitly. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* -------------------------------------------------------------------------- */
+/* Design tokens                                                              */
+/* -------------------------------------------------------------------------- */
+/* Raw values live on :root/.dark; the @theme block below maps them into
+   Tailwind utilities with `inline`, so `bg-surface` resolves to var(--surface)
+   at use time and therefore follows the active theme. */
 
 :root {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color-scheme: light;
+
+  --canvas: #f5f7fa;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f6;
+  --surface-hover: #f1f4f9;
+  --border: #e2e7ef;
+  --border-strong: #cbd3e0;
+
+  --fg: #0d1526;
+  --fg-muted: #56637a;
+  --fg-subtle: #8a95a8;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-fg: #ffffff;
+  --accent-soft: #e7efff;
+
+  --danger: #d92d20;
+  --danger-hover: #b42318;
+  --danger-soft: #fdecea;
+
+  --success: #067647;
+  --success-soft: #e6f6ee;
+  --warning: #b54708;
+  --warning-soft: #fdf2e3;
+
+  --overlay: rgb(15 23 42 / 0.45);
+  --shadow-hue: 220 40% 12%;
+
+  /* Minimum comfortable touch target, per platform accessibility guidance. */
+  --tap-target: 44px;
 }
 
-body {
-  font-family: var(--font-sans);
-  background-color: #f8fafc;
-  color: #0f172a;
-  margin: 0;
-  padding: 0;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+.dark {
+  color-scheme: dark;
+
+  --canvas: #0a0e15;
+  --surface: #111823;
+  --surface-raised: #17202c;
+  --surface-sunken: #0c111a;
+  --surface-hover: #1c2633;
+  --border: #222c3a;
+  --border-strong: #33415380;
+
+  --fg: #e7edf6;
+  --fg-muted: #98a5b8;
+  --fg-subtle: #6a7789;
+
+  --accent: #6f9bff;
+  --accent-hover: #8bb0ff;
+  --accent-fg: #06101f;
+  --accent-soft: #16233a;
+
+  --danger: #f97066;
+  --danger-hover: #fda29b;
+  --danger-soft: #2c1614;
+
+  --success: #4ade80;
+  --success-soft: #10261a;
+  --warning: #fbbf24;
+  --warning-soft: #2a2010;
+
+  --overlay: rgb(2 6 12 / 0.66);
+  --shadow-hue: 220 60% 2%;
+}
+
+@theme inline {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans',
+    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--surface-raised);
+  --color-sunken: var(--surface-sunken);
+  --color-hover: var(--surface-hover);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-soft: var(--danger-soft);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+
+  --radius-card: 0.75rem;
+
+  --shadow-raised: 0 1px 2px hsl(var(--shadow-hue) / 0.06), 0 4px 12px hsl(var(--shadow-hue) / 0.08);
+  --shadow-overlay: 0 8px 32px hsl(var(--shadow-hue) / 0.18);
+
+  --animate-fade-in: fade-in 140ms ease-out;
+  --animate-scale-in: scale-in 140ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  --animate-slide-up: slide-up 180ms cubic-bezier(0.2, 0.9, 0.3, 1);
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97) translateY(-2px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Base                                                                       */
+/* -------------------------------------------------------------------------- */
+
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background-color: var(--canvas);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* One consistent, always-visible focus treatment. The default ring is only
+     ever replaced where this replacement is guaranteed, so focus is never lost. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background-color: var(--accent-soft);
+    color: var(--fg);
+  }
+
+  /* Respect users who ask for less motion: every animation here is decorative,
+     so all of them can collapse without losing meaning. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Utilities                                                                  */
+/* -------------------------------------------------------------------------- */
+
+@layer utilities {
+  /* Enforces the 44x44 minimum touch target for icon-only controls while
+     keeping the visible glyph small. */
+  .tap-target {
+    min-width: var(--tap-target);
+    min-height: var(--tap-target);
+  }
+
+  .scrollbar-slim {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background-color: var(--border-strong);
+    border-radius: 9999px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* Removes content visually while keeping it available to assistive tech. */
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border-width: 0;
+  }
 }
