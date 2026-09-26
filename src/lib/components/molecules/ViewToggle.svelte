@@ -19,6 +19,9 @@
     { id: 'list', label: 'List view' }
   ];
 
+  // The height belongs on the buttons, not the wrapper: the wrapper's `p-1`
+  // padding would eat into it, and a button that sizes to its own content
+  // collapses to the icon box — a 16px target on a phone.
   const TOGGLE_HEIGHT: Record<'sm' | 'md', string> = { sm: 'h-9', md: 'h-11' };
 </script>
 
@@ -31,8 +34,7 @@
   role="radiogroup"
   aria-label={label}
   class={[
-    'inline-flex items-center gap-0.5 rounded-lg border border-line-strong bg-surface p-1',
-    TOGGLE_HEIGHT[size]
+    'inline-flex items-center gap-0.5 rounded-lg border border-line-strong bg-surface p-1'
   ].join(' ')}
 >
   {#each OPTIONS as option (option.id)}
@@ -45,6 +47,7 @@
       onclick={() => (value = option.id)}
       class={[
         'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors',
+        TOGGLE_HEIGHT[size],
         'disabled:cursor-not-allowed disabled:opacity-50',
         value === option.id
           ? 'bg-accent text-accent-fg shadow-raised'

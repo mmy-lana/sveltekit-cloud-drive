@@ -168,6 +168,9 @@
   html {
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+    /* Kills the ~300ms double-tap-zoom delay on every tappable surface. It is
+       scoped to manipulation, not `none`, so pinch-zoom still works. */
+    touch-action: manipulation;
   }
 
   body {

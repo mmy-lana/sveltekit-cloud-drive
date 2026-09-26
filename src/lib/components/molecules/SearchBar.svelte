@@ -190,9 +190,12 @@
 <form role="search" aria-label={label} onsubmit={handleSubmit} class={['relative', className ?? ''].join(' ')}>
   <div
     class={[
-      'flex items-center gap-2 rounded-full border bg-surface px-3 transition-colors',
-      'focus-within:border-accent',
-      loading ? 'h-10 border-line-strong' : 'h-10 border-line-strong'
+      'flex items-center gap-2 rounded-full bg-surface px-3 transition-colors',
+      'focus-within:ring-accent',
+      // A ring, not a border. A border is drawn *inside* the box, so it would
+      // take 2px off the height the input gets and leave the field 2px short
+      // of the 44px target; a ring is drawn outside and costs no layout.
+      'h-11 ring-1 ring-inset ring-line-strong'
     ].join(' ')}
   >
     {#if loading}
@@ -204,6 +207,7 @@
     <input
       bind:this={inputElement}
       type="search"
+      name="q"
       value={draft}
       placeholder={placeholder}
       aria-label={label}
@@ -225,16 +229,22 @@
         historyIndex = -1;
       }}
       onblur={handleBlur}
-      class="min-w-0 flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-fg-subtle [&::-webkit-search-cancel-button]:hidden"
+      class="h-full min-w-0 flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-fg-subtle [&::-webkit-search-cancel-button]:hidden"
     />
 
     {#if draft.length > 0}
+      <!--
+        A 44px button pulled in by a negative margin, not a 32px one with a
+        padded-out ::before. The target is the element, so the element has to
+        be the size a finger needs; the negative margin keeps the pill's
+        padding looking unchanged.
+      -->
       <button
         type="button"
         onclick={clear}
         aria-label="Clear search"
         title="Clear search"
-        class="-mr-1 flex size-8 shrink-0 items-center justify-center rounded-full text-fg-subtle hover:bg-hover hover:text-fg"
+        class="-mx-2 flex size-11 shrink-0 items-center justify-center rounded-full text-fg-subtle hover:bg-hover hover:text-fg"
       >
         <X size={16} aria-hidden="true" />
       </button>

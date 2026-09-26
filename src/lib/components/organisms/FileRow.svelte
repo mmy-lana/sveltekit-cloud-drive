@@ -16,6 +16,7 @@
   import Badge from '../ui/Badge.svelte';
   import { formatBytes, formatModifiedDate, formatLongDate } from '$lib/utils/formatters';
   import type { DriveItem } from '$lib/types/drive';
+  import { FOLDER_DRAG_MIME } from '$lib/config/constants';
 
   interface Props {
     item: DriveItem;
@@ -93,6 +94,21 @@
   $effect(() => () => {
     if (clickTimer !== null) clearTimeout(clickTimer);
   });
+
+  /**
+   * Only folders are draggable. A file has nothing meaningful to be dropped
+   * *into* — moving one is what the context menu's "Move" is for — whereas
+   * dragging a folder into a breadcrumb is the fastest way to reorganise.
+   */
+  const isDraggable = $derived(item.type === 'folder' && !selectionMode);
+
+  function handleDragStart(event: DragEvent): void {
+    if (!isDraggable || event.dataTransfer === null) return;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(FOLDER_DRAG_MIME, item.id);
+    // Some browsers refuse to start a drag unless text/plain is also present.
+    event.dataTransfer.setData('text/plain', item.name);
+  }
 </script>
 
 <!--
@@ -113,8 +129,10 @@
     event.preventDefault();
     onContextMenu(item, { x: event.clientX, y: event.clientY });
   }}
+  draggable={isDraggable}
+  ondragstart={handleDragStart}
   class={[
-    'group relative flex cursor-pointer flex-col gap-1 rounded-lg border bg-surface p-3',
+    'group relative flex cursor-pointer scroll-mt-24 flex-col gap-1 rounded-lg border bg-surface p-3',
     'transition-colors duration-150',
     'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
     'sm:grid sm:grid-cols-[minmax(0,1fr)_9rem_10rem_5rem_7rem] sm:items-center sm:gap-3',

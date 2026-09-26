@@ -119,7 +119,7 @@
     </div>
   {/if}
 
-  <ul class="flex-1 overflow-y-auto">
+  <ul class="flex-1 overflow-y-auto overscroll-contain">
     {#each store.tasks as task (task.taskId)}
       <li class="border-b border-gray-50 px-4 py-3 last:border-b-0 dark:border-gray-800/60">
         <div class="flex items-start gap-2">

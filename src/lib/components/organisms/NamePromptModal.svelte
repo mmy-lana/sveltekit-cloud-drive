@@ -27,6 +27,10 @@
     mode: 'create' | 'rename';
     /** Name to prefill, for rename. Ignored when creating. */
     initialName?: string;
+    /** Heading override, for callers that name their own destination. */
+    title?: string | null;
+    /** Body copy override; `null` keeps the default for the mode. */
+    description?: string | null;
     /** Normalized names already taken in the destination. */
     takenNames?: readonly string[];
     /** True while the caller's transaction is running. */
@@ -42,6 +46,8 @@
     open = $bindable(),
     mode,
     initialName = '',
+    title = null,
+    description = null,
     takenNames = [],
     busy = false,
     error = null,
@@ -87,6 +93,11 @@
 
   const canSubmit = $derived(validation.valid && !busy);
 
+  const heading: string = $derived(title ?? (mode === 'create' ? 'New folder' : 'Rename'));
+  const body: string | null = $derived(
+    description ?? (mode === 'create' ? 'Folders can be nested up to 64 levels deep.' : null)
+  );
+
   function submit(event: SubmitEvent): void {
     event.preventDefault();
     touched = true;
@@ -103,8 +114,8 @@
 
 <Modal
   bind:open
-  title={mode === 'create' ? 'New folder' : 'Rename'}
-  description={mode === 'create' ? 'Folders can be nested up to 64 levels deep.' : null}
+  title={heading}
+  description={body}
   size="sm"
   dismissible={!busy}
   onclose={reset}
@@ -113,6 +124,9 @@
     <Input
       bind:value
       label="Folder name"
+      name="item-name"
+      autocomplete="off"
+      spellcheck="false"
       placeholder="Untitled folder"
       error={message}
       hint={`Up to ${MAX_ITEM_NAME_LENGTH} characters`}

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ChevronRight, House } from '@lucide/svelte';
   import type { BreadcrumbNode } from '$lib/types/drive';
+  import { FOLDER_DRAG_MIME } from '$lib/config/constants';
 
   interface Props {
     /** Root-first path. A leading `{ id: null }` node renders as the Drive home. */
@@ -43,7 +44,7 @@
     event.preventDefault();
     dropTargetId = null;
 
-    const folderId = event.dataTransfer?.getData('application/x-drive-folder-id') ?? '';
+    const folderId = event.dataTransfer?.getData(FOLDER_DRAG_MIME) ?? '';
     if (folderId.length > 0) onDropFolder(folderId);
   }
 </script>
@@ -93,7 +94,7 @@
             draggable={onDropFolder !== undefined && node.id !== null}
             ondragstart={onDropFolder && node.id !== null
               ? (event) => {
-                  event.dataTransfer?.setData('application/x-drive-folder-id', node.id as string);
+                  event.dataTransfer?.setData(FOLDER_DRAG_MIME, node.id as string);
                   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
                 }
               : undefined}

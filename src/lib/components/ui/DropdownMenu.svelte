@@ -279,7 +279,7 @@
       .filter(Boolean)
       .join(' ')}
   >
-    <div class="scrollbar-slim overflow-y-auto py-1" style:max-height="inherit">
+    <div class="scrollbar-slim overflow-y-auto overscroll-contain py-1" style:max-height="inherit">
       {#each entries as entry, index (entry.id)}
         {#if isSeparator(entry)}
           <div role="separator" class="my-1 h-px bg-line"></div>

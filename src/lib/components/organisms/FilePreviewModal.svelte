@@ -232,6 +232,8 @@ const TEXT_LIMIT = 200_000;
         <img
           src={downloadUrl}
           alt={file.name}
+          loading="lazy"
+          decoding="async"
           class="max-h-[60vh] w-auto max-w-full object-contain transition-transform"
           style:transform={`scale(${zoom})`}
         />

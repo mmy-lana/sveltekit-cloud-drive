@@ -154,11 +154,12 @@
              disabled:opacity-50"
       disabled={busy}
       onclick={onSignOut}
+      aria-label={busy ? 'Signing out' : 'Sign out'}
     >
       {#if busy}
-        <LoaderCircle size={18} class="animate-spin" aria-label="Signing out" />
+        <LoaderCircle size={18} class="animate-spin" aria-hidden="true" />
       {:else}
-        <LogOut size={18} aria-label="Sign out" />
+        <LogOut size={18} aria-hidden="true" />
       {/if}
     </button>
   </div>

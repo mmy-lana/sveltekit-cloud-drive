@@ -22,6 +22,13 @@ services:
       - "0.0.0.0:9199:9199"   # Storage
     volumes:
       - ./firebase.json:/firebase/firebase.json:ro
+      # The CLI reads the project id from `.firebaserc`. Without it the Auth
+      # emulator has no project and mints ID tokens with `aud: "change-me"`,
+      # which the Firestore emulator's gRPC-web path (i.e. every browser)
+      # rejects — so reads and writes arrive anonymous and the rules deny
+      # them. Node clients are unaffected, which is what makes this so easy to
+      # miss: the verification harness passes while the app is unusable.
+      - ./.firebaserc:/firebase/.firebaserc:ro
       - ./firestore.rules:/firebase/firestore.rules:ro
       - ./firestore.indexes.json:/firebase/firestore.indexes.json:ro
       - ./storage.rules:/firebase/storage.rules:ro
@@ -29,11 +36,18 @@ services:
       - firebase-emulator-state:/firebase/emulator-state
     environment:
       - FIREBASE_PROJECT=mock-drive-system
+      - GCLOUD_PROJECT=mock-drive-system
+      # The base image hard-codes `GCP_PROJECT=change-me`, and the CLI reads
+      # `GCP_PROJECT` in preference to both `GCLOUD_PROJECT` and `.firebaserc`.
+      # Left alone, the Auth emulator mints ID tokens with `aud: "change-me"`
+      # and the Firestore emulator's gRPC-web path rejects them — so a browser
+      # issues every read and write anonymously and the rules deny it, while
+      # Node clients (which use the native gRPC transport) are unaffected.
+      - GCP_PROJECT=mock-drive-system
       # Accept logins from any origin; this suite is local-only by design.
       - FIREBASE_AUTH_EMULATOR_HOST=0.0.0.0:9099
       - FIREBASE_FIRESTORE_EMULATOR_HOST=0.0.0.0:8080
       - FIREBASE_STORAGE_EMULATOR_HOST=0.0.0.0:9199
-      - GCLOUD_PROJECT=mock-drive-system
 
 volumes:
   firebase-emulator-state:

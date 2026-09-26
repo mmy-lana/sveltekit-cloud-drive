@@ -98,7 +98,10 @@
     </div>
 
     <div class="flex shrink-0 items-center gap-1">
-      <ViewToggle bind:value={viewMode} size="sm" disabled={busy} />
+      <!-- `md`, not `sm`: this is the primary toolbar, and `sm` is a 36px
+           control that clears the WCAG 2.5.8 minimum but not this project's
+           44px bar. -->
+      <ViewToggle bind:value={viewMode} size="md" disabled={busy} />
 
       <IconButton
         label="New folder"
@@ -110,7 +113,7 @@
       />
 
       <Button
-        size="sm"
+        size="md"
         variant="primary"
         leading={Upload}
         class="relative"
@@ -135,7 +138,7 @@
       bind:value={query}
       onSearch={onQueryChange}
       loading={searching}
-      placeholder="Search files and folders"
+      placeholder="Search files and folders…"
       submitRoute="/"
       debounceMs={200}
       class="min-w-0 flex-1"

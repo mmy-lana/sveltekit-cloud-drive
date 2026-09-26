@@ -154,7 +154,7 @@
     </svg>
   {/if}
 
-  <h3 class="text-base font-semibold text-fg">{title}</h3>
+  <h3 class="text-pretty text-base font-semibold text-fg">{title}</h3>
 
   {#if description}
     <p class="max-w-sm text-sm leading-relaxed text-fg-muted">{description}</p>

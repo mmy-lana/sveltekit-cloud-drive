@@ -29,6 +29,7 @@
 import {
   collection,
   doc,
+  getCountFromServer,
   getDoc,
   getDocs,
   limit,
@@ -184,6 +185,12 @@ export class DriveStore {
   #pendingCount = $state(0);
 
   #unsubscribe: Unsubscribe | null = null;
+  /** Separate from `#unsubscribe`: the bin's size is needed in every scope. */
+  #trashCount = $state(0);
+  /** Whose bin is being counted; `null` once the session ends. */
+  #trashCountUid: string | null = null;
+  /** Collapses a burst of snapshots into one aggregation. */
+  #trashCountPending = false;
   /** Resolves when the in-flight subscription for the current scope settles. */
   #firstSnapshot = $state(false);
 
@@ -194,6 +201,19 @@ export class DriveStore {
   /** The active scope. */
   get scope(): DriveScope {
     return this.#scope;
+  }
+
+  /**
+   * How many items are in the bin, for the navigation badge.
+   *
+   * A `getCountFromServer` aggregation rather than a second live item
+   * subscription: the badge needs a number, not the documents, and an
+   * aggregation is billed on one read per index entry rather than one per
+   * document. It stays subscribed across scope changes, so emptying the bin
+   * updates the badge from the root as well as from inside the bin.
+   */
+  get trashCount(): number {
+    return this.#trashCount;
   }
 
   /** Current filter and sort state. */
@@ -363,6 +383,8 @@ export class DriveStore {
     const uid = authStore.uid;
     if (uid === null) return;
 
+    this.#subscribeTrashCount(uid);
+
     const constraints: QueryConstraint[] = [where('ownerId', '==', uid)];
 
     if (this.#scope.kind === 'trash') {
@@ -393,6 +415,7 @@ export class DriveStore {
         for (const [key, value] of next) this.#items.set(key, value);
         this.#firstSnapshot = true;
         this.#status = 'ready';
+        void this.#refreshTrashCount();
       },
       (error: FirestoreError) => {
         this.#error = classifyError(error);
@@ -412,6 +435,48 @@ export class DriveStore {
    * Each level is one point lookup and the chain stops at the first id already
    * cached, so re-entering a folder the user has visited before costs nothing.
    */
+  /**
+   * Keep the bin's size current without subscribing to its documents.
+   *
+   * An exact server-side aggregation rather than a second live query: the
+   * badge needs one number, and a listener over the bin's documents would bill
+   * and transfer a full document per trashed item to render an integer.
+   *
+   * The refresh is driven by the main subscription instead of a timer. That is
+   * not an approximation — the bin can only be emptied, or have items added to
+   * it, from inside the bin, so any change the user can act on arrives as a
+   * snapshot here first. Refreshing on it is both exact and free of polling.
+   *
+   * A failed aggregation is not surfaced. The badge is decoration, and a missing
+   * number must never become the reason a drive fails to load.
+   */
+  #subscribeTrashCount(uid: string): void {
+    this.#trashCountUid = uid;
+    void this.#refreshTrashCount();
+  }
+
+  async #refreshTrashCount(): Promise<void> {
+    const uid = this.#trashCountUid;
+    if (uid === null || this.#trashCountPending) return;
+    this.#trashCountPending = true;
+
+    try {
+      const aggregate = await getCountFromServer(
+        query(
+          collection(getFirestoreClient(), 'items'),
+          where('ownerId', '==', uid),
+          where('isTrashed', '==', true)
+        )
+      );
+      // Drop a result that arrived after sign-out or an account switch.
+      if (this.#trashCountUid === uid) this.#trashCount = aggregate.data().count;
+    } catch {
+      if (this.#trashCountUid === uid) this.#trashCount = 0;
+    } finally {
+      this.#trashCountPending = false;
+    }
+  }
+
   async #loadAncestors(folderId: string): Promise<void> {
     if (this.#ancestors.has(folderId)) return;
     const uid = authStore.uid;
@@ -450,6 +515,8 @@ export class DriveStore {
   destroy(): void {
     this.#unsubscribe?.();
     this.#unsubscribe = null;
+    this.#trashCount = 0;
+    this.#trashCountUid = null;
     this.#folderIndex.clear();
     this.#folderTreeStatus = 'idle';
     this.#folderTreeRequest = null;

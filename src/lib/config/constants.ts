@@ -46,5 +46,32 @@ export const MAX_UPLOAD_TASK_HISTORY = 20;
 /** Debounce before a directory drag is parsed and enqueued, in milliseconds. */
 export const DIRECTORY_SCAN_DEBOUNCE_MS = 120;
 
+/**
+ * MIME type carrying a dragged folder's id.
+ *
+ * A custom type rather than `text/plain` so the drop can be told apart from
+ * dragging text into the page, which the upload dropzone handles separately.
+ */
+export const FOLDER_DRAG_MIME = 'application/x-drive-folder-id';
+
 /** Longest ancestor chain walked when validating a folder move. */
 export const MAX_ANCESTOR_DEPTH = 64;
+
+/**
+ * The plan's responsive matrix, as three lower bounds in CSS pixels.
+ *
+ * The layout switches on these in JavaScript — the navigation changes shape,
+ * not just size, so it cannot be left to media queries alone — and in CSS
+ * through the matching `sm:`/`md:`/`lg:` prefixes. Keep the two in step:
+ * `sm` is 640 in Tailwind, which is deliberately *not* a matrix boundary, so
+ * the prefixes are only used for spacing refinements inside a tier.
+ */
+export const VIEWPORT_TIER_MIN_WIDTH = {
+  /** Below this the primary navigation is a fixed bottom bar. */
+  tablet: 768,
+  /** At or above this the sidebar is persistent and fully labelled. */
+  desktop: 1024
+} as const;
+
+/** Width assumed before the client has measured, matching the desktop tier. */
+export const DEFAULT_VIEWPORT_WIDTH = VIEWPORT_TIER_MIN_WIDTH.desktop;

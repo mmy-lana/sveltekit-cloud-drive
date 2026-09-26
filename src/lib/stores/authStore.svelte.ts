@@ -53,6 +53,7 @@ class AuthStore {
   #status = $state<AuthStatus>('initializing');
   #user = $state<User | null>(null);
   #profile = $state<DriveUser | null>(null);
+  #profileError = $state<ClassifiedError | null>(null);
   #error = $state<ClassifiedError | null>(null);
 
   #authUnsubscribe: Unsubscribe | null = null;
@@ -90,7 +91,34 @@ class AuthStore {
     return this.#error;
   }
 
-  /** `true` once a uid is available; gates every other store's Firestore work. */
+  /**
+   * Why the drive profile could not be read or provisioned.
+   *
+   * Deliberately separate from {@link error}: a Firestore problem is not an
+   * authentication problem, and conflating them is what made a provisioning
+   * failure look identical to "still connecting" — a state with no exit.
+   */
+  get profileError(): ClassifiedError | null {
+    return this.#profileError;
+  }
+
+  /**
+   * `true` once the auth layer has settled on an identity.
+   *
+   * This is what the shell gate keys on. It deliberately does not wait for the
+   * profile document: identity comes from Auth, and a drive record that fails to
+   * load is a drive problem with its own surface and its own retry, not a reason
+   * to hold the whole app behind a splash screen.
+   */
+  get isAuthenticated(): boolean {
+    return (
+      this.#user !== null &&
+      this.#status !== 'initializing' &&
+      this.#status !== 'signing-in'
+    );
+  }
+
+  /** `true` once a uid *and* the profile that carries the quota ledger exist. */
   get isReady(): boolean {
     return this.#user !== null && this.#profile !== null;
   }
@@ -119,9 +147,11 @@ class AuthStore {
           this.#profileUnsubscribe?.();
           this.#profileUnsubscribe = null;
           this.#profile = null;
+          this.#profileError = null;
           this.#status = 'signed-out';
           return;
         }
+        this.#status = 'signed-in';
         void this.#bindProfile(user);
       },
       (error) => {
@@ -146,7 +176,9 @@ class AuthStore {
    * Create the profile document if it is missing, then subscribe to it.
    *
    * The `setDoc` merge is safe to re-run: a failure halfway through leaves
-   * either no document or the complete document, and a retry converges.
+   * either no document or the complete document, and a retry converges. That is
+   * what {@link retryProfile} leans on — the same call, one turn later, after
+   * whatever broke the first time has been fixed.
    */
   async #bindProfile(user: User): Promise<void> {
     const db = getFirestoreClient();
@@ -158,12 +190,10 @@ class AuthStore {
       (snapshot) => {
         if (!snapshot.exists()) return;
         this.#profile = { uid: snapshot.id, ...snapshot.data() } as DriveUser;
-        this.#status = 'signed-in';
-        this.#error = null;
+        this.#profileError = null;
       },
       (error) => {
-        this.#error = classifyError(error);
-        this.#status = 'error';
+        this.#profileError = classifyError(error);
       }
     );
 
@@ -190,9 +220,21 @@ class AuthStore {
         { merge: true }
       );
     } catch (error) {
-      this.#error = classifyError(error);
-      this.#status = 'error';
+      this.#profileError = classifyError(error);
     }
+  }
+
+  /**
+   * Re-run profile provisioning for the signed-in user.
+   *
+   * Surfaced by the shell's "drive unavailable" card. A no-op when there is no
+   * session, so the button cannot resurrect a profile for a user who is gone.
+   */
+  retryProfile(): void {
+    const user = this.#user;
+    if (user === null) return;
+    this.#profileError = null;
+    void this.#bindProfile(user);
   }
 
   /** Change the display name shown in the account menu. */

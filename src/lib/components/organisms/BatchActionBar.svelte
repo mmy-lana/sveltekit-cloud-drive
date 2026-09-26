@@ -150,7 +150,7 @@
     <div class="ml-auto flex items-center gap-1">
       {#each actions as action (action.id)}
         <Button
-          size="sm"
+          size="md"
           variant={action.variant}
           leading={action.icon}
           loading={busy && action.primary}
@@ -163,10 +163,10 @@
       {/each}
     </div>
 
-    <IconButton label="Clear selection" size="sm" variant="ghost" icon={X} disabled={busy} onclick={onClear} />
+    <IconButton label="Clear selection" size="md" variant="ghost" icon={X} disabled={busy} onclick={onClear} />
   </div>
 
   <div class="hidden border-t border-gray-100 px-2 py-1 sm:block dark:border-gray-800">
-    <Button size="sm" variant="ghost" disabled={busy} onclick={onSelectAll}>Select all</Button>
+    <Button size="md" variant="ghost" disabled={busy} onclick={onSelectAll}>Select all</Button>
   </div>
 </div>

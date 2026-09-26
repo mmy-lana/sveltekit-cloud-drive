@@ -12,7 +12,8 @@
     "emulators:logs": "docker compose logs -f firebase-emulator",
     "emulators:down": "docker compose down",
     "emulators:reset": "docker compose down -v",
-    "verify": "vite-node --options.deps.inline=@sveltejs scripts/verify-stores.ts"
+    "verify": "vite-node --options.deps.inline=@sveltejs scripts/verify-stores.ts",
+    "audit:responsive": "vite-node --options.deps.inline=@sveltejs scripts/audit-responsive.ts"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "latest",
@@ -20,6 +21,7 @@
     "@sveltejs/vite-plugin-svelte": "latest",
     "@tailwindcss/vite": "latest",
     "@typescript/native": "npm:typescript@^7.0.2",
+    "playwright-core": "^1.63.0",
     "svelte": "latest",
     "svelte-check": "latest",
     "tailwindcss": "latest",

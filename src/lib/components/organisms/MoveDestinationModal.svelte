@@ -151,14 +151,17 @@
       bind:value={query}
       prefix={Search}
       label="Filter folders"
-      placeholder="Type to filter"
+      name="folder-filter"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder="Type to filter…"
       clearable
       clearLabel="Clear folder filter"
       disabled={busy}
     />
 
     <div
-      class="max-h-72 overflow-y-auto rounded-lg border border-gray-200 p-1 dark:border-gray-800"
+      class="max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-gray-200 p-1 dark:border-gray-800"
       role="tree"
       aria-label="Destination folders"
       aria-busy={store.isLoadingFolderTree}
